@@ -10,7 +10,7 @@ This repository contains the configuration and scripts used to deploy and manage
 | `setup_aibrix.sh` | script to install AIBrix dependencies and core components. |
 | `query_model.py` | Python example to query the model via the LLM Gateway. |
 | `cleanup_gpu.sh` | Utility to force-clear GPU memory and stale vLLM processes. |
-| `k.yaml` | K3s cluster kubeconfig. |
+| `AIBRIX_EXTENDED_FEATURES.md` | In-depth guide to LoRA, Scaling, and Distributed KV Caching. |
 | `RESEARCH_NOTEBOOK.md` | Deep dive into architecture, OOM fixes, and learning outcomes. |
 
 ## 🚀 Quick Start
