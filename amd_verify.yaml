@@ -1,0 +1,26 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: gpu-verify-amd
+  namespace: default
+spec:
+  template:
+    spec:
+      hostPID: true
+      nodeName: openai-gpt-oss-rocm-7-gpu-mi300x1-192gb-devcloud-atl1
+      containers:
+      - name: verify
+        image: rocm/dev-ubuntu-22.04:6.2
+        command: ["/bin/bash", "-c"]
+        args:
+          - |
+            echo "--- VRAM Status ---"
+            rocm-smi || true
+            echo "--- Host Processes ---"
+            ps -ef | grep vllm | grep -v grep || true
+            echo "--- Docker Containers ---"
+            nsenter -t 1 -m -u -n -i docker ps | grep -E "vllm|gpt" || true
+        securityContext:
+          privileged: true
+      restartPolicy: Never
+  backoffLimit: 0

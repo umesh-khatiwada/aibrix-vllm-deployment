@@ -8,6 +8,8 @@ metadata:
   namespace: default
 spec:
   replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       model.aibrix.ai/name: deepseek-r1-qwen-1b5-amd
@@ -37,8 +39,13 @@ spec:
         - "12288"
         - --gpu-memory-utilization
         - "0.7"
-        image: vllm/vllm-openai-rocm:v0.11.0
-        imagePullPolicy: IfNotPresent
+        image: vllm/vllm-omni-rocm:v0.12.0rc1
+        imagePullPolicy: Always
+        env:
+        - name: VLLM_TARGET_DEVICE
+          value: rocm
+        - name: VLLM_LOGGING_LEVEL
+          value: DEBUG
         name: vllm-openai
         ports:
         - containerPort: 8000

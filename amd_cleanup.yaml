@@ -1,0 +1,28 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: gpu-cleanup-amd
+  namespace: default
+spec:
+  template:
+    spec:
+      hostPID: true
+      nodeName: openai-gpt-oss-rocm-7-gpu-mi300x1-192gb-devcloud-atl1
+      containers:
+      - name: cleanup
+        image: ubuntu:22.04
+        command: ["/bin/bash", "-c"]
+        args:
+          - |
+            echo "--- Stopping Rogue Docker Container ---"
+            nsenter -t 1 -m -u -n -i docker stop rocm-gpt-oss || true
+            nsenter -t 1 -m -u -n -i docker rm rocm-gpt-oss || true
+            echo "--- Killing remaining vllm processes ---"
+            nsenter -t 1 -m -u -n -i pkill -9 -f "vllm" || true
+            echo "--- Verification ---"
+            nsenter -t 1 -m -u -n -i docker ps | grep gpt || true
+            ps -ef | grep vllm | grep -v grep || true
+        securityContext:
+          privileged: true
+      restartPolicy: Never
+  backoffLimit: 0
