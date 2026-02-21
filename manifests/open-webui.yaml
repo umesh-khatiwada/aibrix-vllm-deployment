@@ -43,6 +43,16 @@ spec:
               value: "AIBrix Explorer"
             - name: ENABLE_MODEL_FILTER
               value: "false"
+            - name: SHOW_TOKENS_PER_SECOND
+              value: "true"
+            - name: ENABLE_MODEL_METRICS
+              value: "true"
+            - name: ENABLE_METRICS
+              value: "true"
+            - name: SHOW_ADMIN_DETAILS
+              value: "true"
+            - name: ENABLE_PERSISTENT_CONFIG
+              value: "false"
             # OIDC Configuration (Auth0)
             - name: ENABLE_OIDC
               value: "true"
