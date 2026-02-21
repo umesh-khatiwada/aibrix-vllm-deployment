@@ -39,6 +39,7 @@ Verified the following features as functional on the cluster:
 - [x] **Prefix Caching**: Verified `prefix-cache` routing strategy.
 - [x] **Autoscaling**: Scaled manifests to AIBrix `v1alpha1` PodAutoscaler schema.
 - [x] **Multi-Model Routing**: Verified simultaneous execution of DeepSeek and Llama on a single GPU using a privileged configuration with HostPath device mounts.
+- [x] **Open WebUI**: Deployed and connected to the AIBrix Gateway, providing a visual chat interface for and multi-model switching.
 
 ---
 **Status**: Completed & Verified
