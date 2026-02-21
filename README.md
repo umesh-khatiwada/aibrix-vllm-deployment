@@ -60,8 +60,11 @@ curl http://localhost:8888/v1/completions \
 
 ## 📖 Key Documentation
 - [Research Guide](docs/AIBRIX_RESEARCH_GUIDE.md)
+- [Implementation Report](docs/IMPLEMENTATION_REPORT.md)
 - [Extended Features](docs/AIBRIX_EXTENDED_FEATURES.md)
 - [Research Notebook](docs/RESEARCH_NOTEBOOK.md)
+- [Multi-Model Routing Guide](docs/MULTI_MODEL_ROUTING_GUIDE.md)
+- [AMD Feature Test Guide](docs/AMD_FEATURE_TEST_GUIDE.md)
 
 
 ## 📊 Performance at a Glance
