@@ -1,52 +1,74 @@
-# AIBrix K3s Deployment Workspace
+# AIBrix: Scalable GenAI Inference (NVIDIA & AMD)
 
-This repository contains the configuration and scripts used to deploy and manage [AIBrix](https://github.com/vllm-project/aibrix) on a local K3s cluster with NVIDIA GPUs.
+This repository contains the configuration and research data for deploying [AIBrix](https://github.com/vllm-project/aibrix) on K3s clusters, optimized for both NVIDIA and AMD GPUs.
+
+## 🚀 Overview
+
+AIBrix is a cloud-native framework co-designed with inference engines like vLLM to provide scalable, enterprise-grade LLM serving infrastructure.
+
+### Key Components
+- **Control Plane**: Manages model metadata, multi-LoRA deployments, and LLM-specific autoscaling.
+- **Data Plane**: Features an LLM-aware Request Router and a Distributed KV Cache Runtime.
 
 ## 📁 Repository Structure
 
-| File | Description |
+| File/Directory | Description |
 |---|---|
-| `nvidia-model.yaml` | Deployment & Service manifest for DeepSeek-R1-1.5B (Optimized). |
-| `setup_aibrix.sh` | script to install AIBrix dependencies and core components. |
-| `query_model.py` | Python example to query the model via the LLM Gateway. |
-| `cleanup_gpu.sh` | Utility to force-clear GPU memory and stale vLLM processes. |
-| `AIBRIX_EXTENDED_FEATURES.md` | In-depth guide to LoRA, Scaling, and Distributed KV Caching. |
-| `RESEARCH_NOTEBOOK.md` | Deep dive into architecture, OOM fixes, and learning outcomes. |
+| `docs/` | Comprehensive AIBrix research data and guides. |
+| `manifests/` | Kubernetes manifests for NVIDIA, AMD, and Distributed setups. |
+| `setup_aibrix.sh` | Installation script for AIBrix core and dependencies. |
+| `cleanup_gpu.sh` | Utility to clear GPU memory and processes. |
 
-## 🚀 Quick Start
+## 🛠 Multi-GPU Quick Start
 
-### 1. Environment Setup
+### 1. Installation
 ```bash
+# Point to your kubeconfig
 export KUBECONFIG=$(pwd)/k.yaml
-```
 
-### 2. Install AIBrix (If not already installed)
-```bash
+# Install AIBrix v0.3.0
 bash setup_aibrix.sh
 ```
 
-### 3. Deploy Model
+### 2. Deploy Based on GPU Type
+
+**For NVIDIA:**
 ```bash
-kubectl apply -f nvidia-model.yaml
+kubectl apply -f manifests/nvidia/nvidia-model.yaml
 ```
 
-### 4. Port-Forward Gateway
-In a separate terminal:
+**For AMD:**
 ```bash
+kubectl apply -f manifests/amd/amd_model.yaml
+```
+
+### 3. Deploy Distributed Inference (Optional)
+```bash
+kubectl apply -f manifests/distributed-inference.yaml
+```
+
+### 4. Query the Gateway
+```bash
+# Port-forward the gateway
 kubectl -n envoy-gateway-system port-forward service/envoy-aibrix-system-aibrix-eg-903790dc 8888:80
+
+# Send request with prefix-cache strategy
+curl http://localhost:8888/v1/completions \
+  -H "routing-strategy: prefix-cache" \
+  -d '{"model": "deepseek-r1...", "prompt": "Hello world"}'
 ```
 
-### 5. Query Model
-```bash
-python3 query_model.py
-```
+## 📖 Key Documentation
+- [Research Guide](docs/AIBRIX_RESEARCH_GUIDE.md)
+- [Extended Features](docs/AIBRIX_EXTENDED_FEATURES.md)
+- [Research Notebook](docs/RESEARCH_NOTEBOOK.md)
 
-## 🛠 Troubleshooting
 
-If you encounter **CUDA Out of Memory** or **Disk Pressure**:
-1. Run `./cleanup_gpu.sh` to kill rogue processes.
-2. Run `docker system prune -af` to free disk space.
-3. Check `nvidia-smi` to ensure at least 5GB of VRAM is free before starting.
+## 📊 Performance at a Glance
+- **TTFT Improvement**: ~45% using prefix-cache routing.
+- **Latency Reduction**: ~70% with KVCache offloading.
+- **Throughput Increase**: ~50% with distributed KV cache.
 
 ---
-*Created for research and learning on local LLM infrastructure.*
+*Developed by ByteDance & the Open Source Community.*
+

@@ -1,0 +1,108 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    model.aibrix.ai/name: deepseek-r1-qwen-1b5-amd
+    model.aibrix.ai/port: "8000"
+  name: deepseek-r1-qwen-1b5-amd
+  namespace: default
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      model.aibrix.ai/name: deepseek-r1-qwen-1b5-amd
+      model.aibrix.ai/port: "8000"
+  template:
+    metadata:
+      labels:
+        model.aibrix.ai/name: deepseek-r1-qwen-1b5-amd
+        model.aibrix.ai/port: "8000"
+    spec:
+      containers:
+      - command:
+        - python3
+        - -m
+        - vllm.entrypoints.openai.api_server
+        - --host
+        - "0.0.0.0"
+        - --port
+        - "8000"
+        - --uvicorn-log-level
+        - warning
+        - --model
+        - deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B
+        - --served-model-name
+        - deepseek-r1-qwen-1b5-amd
+        - --max-model-len
+        - "12288"
+        - --gpu-memory-utilization
+        - "0.7"
+        - --enable-lora
+        image: vllm/vllm-omni-rocm:v0.12.0rc1
+        imagePullPolicy: Always
+        env:
+        - name: VLLM_TARGET_DEVICE
+          value: rocm
+        - name: VLLM_LOGGING_LEVEL
+          value: DEBUG
+        - name: VLLM_ALLOW_RUNTIME_LORA_UPDATING
+          value: "True"
+        - name: AIBRIX_KV_CACHE_OL_L1_CACHE_ENABLED
+          value: "1"
+        - name: AIBRIX_KV_CACHE_OL_L1_CACHE_EVICTION_POLICY
+          value: "S3FIFO"
+        - name: AIBRIX_KV_CACHE_OL_L1_CACHE_CAPACITY_GB
+          value: "2"
+        name: vllm-openai
+        ports:
+        - containerPort: 8000
+          protocol: TCP
+        resources:
+          limits:
+            amd.com/gpu: "1"
+          requests:
+            amd.com/gpu: "1"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+        startupProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          failureThreshold: 60
+          periodSeconds: 5
+      - name: aibrix-runtime
+        image: aibrix/runtime:v0.3.0
+        command:
+        - aibrix_runtime
+        - --port
+        - "8080"
+        env:
+        - name: INFERENCE_ENGINE
+          value: vllm
+        - name: INFERENCE_ENGINE_ENDPOINT
+          value: http://localhost:8000
+        ports:
+        - containerPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: deepseek-r1-qwen-1b5-amd
+  labels:
+    model.aibrix.ai/name: deepseek-r1-qwen-1b5-amd
+spec:
+  selector:
+    model.aibrix.ai/name: deepseek-r1-qwen-1b5-amd
+  ports:
+  - name: serve
+    port: 8000
+    protocol: TCP
+    targetPort: 8000

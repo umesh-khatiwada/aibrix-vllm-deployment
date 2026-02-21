@@ -1,0 +1,64 @@
+apiVersion: orchestration.aibrix.ai/v1alpha1
+kind: RayClusterFleet
+metadata:
+  name: qwen-coder-7b-instruct
+  labels:
+    app.kubernetes.io/name: aibrix
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      model.aibrix.ai/name: qwen-coder-7b-instruct
+  strategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        model.aibrix.ai/name: qwen-coder-7b-instruct
+      annotations:
+        ray.io/overwrite-container-cmd: "true"
+    spec:
+      rayVersion: "2.10.0"
+      headGroupSpec:
+        rayStartParams:
+          dashboard-host: "0.0.0.0"
+        template:
+          spec:
+            containers:
+            - name: ray-head
+              image: vllm/vllm-openai:v0.11.0
+              command: ["/bin/bash", "-c"]
+              args:
+              - >
+                ulimit -n 65536 &&
+                eval "$KUBERAY_GEN_RAY_START_CMD" &
+                until curl --max-time 5 --fail http://127.0.0.1:8265; do sleep 2; done &&
+                vllm serve Qwen/Qwen2.5-Coder-7B-Instruct \
+                  --served-model-name qwen-coder-7b-instruct \
+                  --tensor-parallel-size 2 \
+                  --distributed-executor-backend ray \
+                  --host 0.0.0.0 --port 8000 --dtype half
+              resources:
+                limits:
+                  nvidia.com/gpu: 1
+            - name: aibrix-runtime
+              image: aibrix/runtime:v0.3.0
+              command: [aibrix_runtime, --port, "8080"]
+              env:
+              - name: INFERENCE_ENGINE
+                value: vllm
+              - name: INFERENCE_ENGINE_ENDPOINT
+                value: http://localhost:8000
+      workerGroupSpecs:
+      - groupName: small-group
+        replicas: 1
+        minReplicas: 1
+        maxReplicas: 5
+        template:
+          spec:
+            containers:
+            - name: ray-worker
+              image: vllm/vllm-openai:v0.11.0
+              resources:
+                limits:
+                  nvidia.com/gpu: 1
