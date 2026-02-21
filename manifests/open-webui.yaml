@@ -43,6 +43,21 @@ spec:
               value: "AIBrix Explorer"
             - name: ENABLE_MODEL_FILTER
               value: "false"
+            # OIDC Configuration (Auth0)
+            - name: ENABLE_OIDC
+              value: "true"
+            - name: OIDC_CLIENT_ID
+              value: "YOUR_AUTH0_CLIENT_ID"
+            - name: OIDC_CLIENT_SECRET
+              value: "YOUR_AUTH0_CLIENT_SECRET"
+            - name: OIDC_ISSUER_URL
+              value: "https://YOUR_AUTH0_DOMAIN/"
+            - name: OIDC_OPENID_CONFIG_URL
+              value: "https://YOUR_AUTH0_DOMAIN/.well-known/openid-configuration"
+            - name: OIDC_REDIRECT_URI
+              value: "http://localhost:3000/oauth2/callback"
+            - name: WEBUI_AUTH
+              value: "true"
           volumeMounts:
             - name: webui-data
               mountPath: /app/backend/data

@@ -1,0 +1,26 @@
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: SecurityPolicy
+metadata:
+  name: aibrix-oidc-policy
+  namespace: aibrix-system
+spec:
+  targetRefs:
+    # - group: gateway.networking.k8s.io
+    #   kind: HTTPRoute
+    #   name: aibrix-reserved-router-metadata-endpoint # Enforce on metadata
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: deepseek-r1-qwen-1b5-amd-router # Enforce on specific model routes
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: llama-3-2-1b-amd-router # Enforce on specific model routes
+  oidc:
+    provider:
+      issuer: "https://YOUR_AUTH0_DOMAIN/"
+      authorizationEndpoint: "https://YOUR_AUTH0_DOMAIN/authorize"
+      tokenEndpoint: "https://YOUR_AUTH0_DOMAIN/oauth/token"
+    clientID: "YOUR_AUTH0_CLIENT_ID"
+    clientSecret:
+      name: oidc-client-secret
+    redirectURL: "http://localhost:8888/oauth2/callback"
+    logoutPath: "/logout"
