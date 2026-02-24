@@ -1,0 +1,31 @@
+apiVersion: aigateway.envoyproxy.io/v1alpha1
+kind: AIServiceBackend
+metadata:
+  name: qwen-coder-1-5b-instruct
+  namespace: envoy-gateway-system
+spec:
+  schema:
+    name: OpenAI
+    version: v1       # deprecated but harmless for OpenAI
+    prefix: /v1       # vLLM API prefix
+  backendRef:
+    name: qwen-coder-1-5b-instruct-backend   # references the Backend resource above
+    namespace: envoy-gateway-system
+    kind: Backend
+    group: gateway.envoyproxy.io
+---
+apiVersion: aigateway.envoyproxy.io/v1alpha1
+kind: AIServiceBackend
+metadata:
+  name: qwen-code-lora
+  namespace: envoy-gateway-system
+spec:
+  schema:
+    name: OpenAI
+    version: v1       # deprecated but harmless for OpenAI
+    prefix: /v1       # vLLM API prefix
+  backendRef:
+    name: qwen-code-lora    # references the Backend resource above
+    namespace: envoy-gateway-system
+    kind: Backend
+    group: gateway.envoyproxy.io

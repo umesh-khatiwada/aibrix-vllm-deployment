@@ -1,0 +1,173 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    model.aibrix.ai/name: qwen-coder-1-5b-instruct # Note: The label value `model.aibrix.ai/name` here must match with the service name.
+    model.aibrix.ai/port: "8000"
+    adapter.model.aibrix.ai/enabled: "true" # Required for LoRA adapter support
+  name: qwen-coder-1-5b-instruct
+  namespace: default
+spec:
+  # Increase replicas for better adapter reliability and load distribution
+  # Allows multiple LoRA adapters to be distributed across pods
+  replicas: 1
+  selector:
+    matchLabels:
+      model.aibrix.ai/name: qwen-coder-1-5b-instruct
+  template:
+    metadata:
+      labels:
+        model.aibrix.ai/name: qwen-coder-1-5b-instruct
+        adapter.model.aibrix.ai/enabled: "true"
+    spec:
+      containers:
+        - command:
+            - python3
+            - -m
+            - vllm.entrypoints.openai.api_server
+            - --host
+            - "0.0.0.0"
+            - --port
+            - "8000"
+            - --uvicorn-log-level
+            - warning
+            - --model
+            - Qwen/Qwen2.5-Coder-1.5B-Instruct
+            - --served-model-name
+            # Note: The `--served-model-name` argument value must also match the Service name and the Deployment label `model.aibrix.ai/name`
+            - qwen-coder-1-5b-instruct
+            - --enable-lora
+          image: rocm/vllm:latest
+          imagePullPolicy: Always
+          name: vllm-openai
+          env:
+            # REQUIRED: Enable runtime LoRA updating for ModelAdapter support
+            - name: VLLM_ALLOW_RUNTIME_LORA_UPDATING
+              value: "True"
+            # Optional: Increase timeout for better reliability during adapter loading
+            - name: VLLM_LORA_MODULES_LOADING_TIMEOUT
+              value: "300"
+          ports:
+            - containerPort: 8000
+              protocol: TCP
+          resources:
+            limits:
+              amd.com/gpu: "1"
+            requests:
+              amd.com/gpu: "1"
+          # Health checks for better pod reliability
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health  
+              port: 8000
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            successThreshold: 1
+            failureThreshold: 3
+          volumeMounts:
+            - mountPath: /root/.cache/huggingface
+              name: hf-cache
+            - mountPath: /tmp/aibrix/adapters      
+              name: adapter-storage
+        - name: aibrix-runtime
+          image: aibrix/runtime:v0.5.0
+          command:
+            - aibrix_runtime
+            - --port
+            - "8080"
+          env:
+            - name: INFERENCE_ENGINE
+              value: vllm
+            - name: INFERENCE_ENGINE_ENDPOINT
+              value: http://localhost:8000
+          ports:
+            - containerPort: 8080
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 2
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          volumeMounts:                                                                                                                                                                                                                         
+          - mountPath: /root/.cache/huggingface                                                                                                                                                                                                 
+            name: hf-cache 
+          - mountPath: /tmp/aibrix/adapters
+            name: adapter-storage 
+      volumes:                                                                                                                                                                                                                                
+      - name: hf-cache                                                                                                                                                                                                                        
+        persistentVolumeClaim:                                                                                                                                                                                                                
+          claimName: hf-cache-pvc-qwen
+      - name: adapter-storage
+        emptyDir: {}
+---
+
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    model.aibrix.ai/name: qwen-coder-1-5b-instruct
+    prometheus-discovery: "true"
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "8080"
+  name: qwen-coder-1-5b-instruct
+  namespace: default
+spec:
+  ports:
+    - name: serve
+      port: 8000
+      protocol: TCP
+      targetPort: 8000
+    - name: http
+      port: 8080
+      protocol: TCP
+      targetPort: 8080
+  selector:
+    model.aibrix.ai/name: qwen-coder-1-5b-instruct
+  type: ClusterIP
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: hf-cache-pvc-qwen
+  namespace: default
+spec:
+  accessModes:
+  - ReadWriteMany
+  resources:
+    requests:
+      storage: 200Gi
+  storageClassName: multinode   
+---
+apiVersion: model.aibrix.ai/v1alpha1
+kind: ModelAdapter
+metadata:
+  name: qwen-code-lora
+  namespace: default
+  labels:
+    model.aibrix.ai/name: "qwen-code-lora"
+    model.aibrix.ai/port: "8000"
+spec:
+  baseModel: qwen-coder-1-5b-instruct
+  podSelector:
+    matchLabels:
+      model.aibrix.ai/name: qwen-coder-1-5b-instruct
+      adapter.model.aibrix.ai/enabled: "true"
+  artifactURL: huggingface://ai-blond/Qwen-Qwen2.5-Coder-1.5B-Instruct-lora
+  schedulerName: default

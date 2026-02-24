@@ -1,0 +1,41 @@
+apiVersion: aigateway.envoyproxy.io/v1alpha1
+kind: AIGatewayRoute
+metadata:
+  name: llama3-route
+  namespace: envoy-gateway-system
+spec:
+  parentRefs:
+    - name: aibrix-ai-gateway
+      kind: Gateway
+      group: gateway.networking.k8s.io
+  rules:
+    # - matches:
+    #     - headers:
+    #         - type: Exact
+    #           name: x-ai-eg-model
+    #           value: meta-llama/Llama-3.2-1B-Instruct
+    #   backendRefs:
+    #     - name: vllm-llama3-1b    
+    # - matches:
+    #     - headers:
+    #         - type: Exact
+    #           name: x-ai-eg-model
+    #           value: deepseek-r1-distill-llama-8b
+    #   backendRefs:
+    #     - name: deepseek-r1-distill-llama-8b
+    - matches:
+        - headers:
+            - type: Exact
+              name: x-ai-eg-model
+              value: qwen-coder-1-5b-instruct
+      backendRefs:
+        - name: qwen-coder-1-5b-instruct
+    - matches:
+        - headers:
+            - type: Exact
+              name: x-ai-eg-model
+              value: qwen-code-lora   # match what you send as "model"
+      backendRefs:
+        - name: qwen-code-lora
+    - backendRefs:
+        - name: qwen-coder-1-5b-instruct
