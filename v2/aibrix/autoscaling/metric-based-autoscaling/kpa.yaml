@@ -1,0 +1,28 @@
+apiVersion: autoscaling.aibrix.ai/v1alpha1
+kind: PodAutoscaler
+metadata:
+  name: qwen-coder-lora-autoscaler
+  namespace: default
+  labels:
+    app.kubernetes.io/name: aibrix
+  annotations:
+    # kpa.autoscaling.aibrix.ai/stable-window: "60s"
+    # kpa.autoscaling.aibrix.ai/panic-window: "10s"
+    # kpa.autoscaling.aibrix.ai/panic-threshold: "110"   # 110% of target triggers panic
+    # kpa.autoscaling.aibrix.ai/scale-down-delay: "120s" # don't scale down too fast
+    kpa.autoscaling.aibrix.ai/scale-down-delay: 3m
+spec:
+  scalingStrategy: KPA
+  minReplicas: 1
+  maxReplicas: 2
+  metricsSources:
+    - metricSourceType: pod
+      protocolType: http
+      port: "8000"           # aibrix-runtime port (exposes unified metrics)
+      path: metrics/
+      targetMetric: "num_requests_running"
+      targetValue: "5"       # scale up when each pod averages >5 concurrent requests
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: qwen-coder-1-5b-instruct

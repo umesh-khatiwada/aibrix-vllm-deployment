@@ -1,0 +1,1934 @@
+curl http://134.199.201.56:80/v1/chat/completions   -H "Content-Type: application/json"   -H "model: Llama-3.2-1B"   -d '{
+    "model": "Llama-3.2-1B",
+    "messages": [{"role": "user", "content": "Hello"}],
+    "max_tokens": 256,
+    "stream": false
+  }'
+  
+curl http://localhost:30000/v1/chat/completions   -H "Content-Type: application/json"   -d '{
+    "model": "Llama-3.2-1B",
+    "messages": [{"role": "user", "content": "Hello"}],
+    "max_tokens": 256
+  }'
+
+
+
+
+
+
+# ================================================================
+# RayClusterFleet: TP + P/D Disaggregation
+#
+# Based on image 1 (right side): each RayCluster contains both
+# prefill and decode nodes internally. Ray handles TP across nodes.
+#
+# Layout per RayCluster (4 GPUs total):
+#   head node   → prefill  (1x MI300X, tp shard 0)
+#   worker-1    → prefill  (1x MI300X, tp shard 1)  <- tp=2 for prefill
+#   worker-2    → decode   (1x MI300X, tp shard 0)
+#   worker-3    → decode   (1x MI300X, tp shard 1)  <- tp=2 for decode
+#
+# KV transfer: mooncake/nixl over RDMA between prefill and decode
+#              nodes inside the same RayCluster
+#
+# PREREQS:
+#   - KubeRay operator installed
+#   - AIBrix operator installed
+#   - RDMA networking between nodes
+#   - Model weights at /data01/models on each node
+#   - 1 GPU per node (AMD MI300X)
+# ================================================================
+
+---
+apiVersion: orchestration.aibrix.ai/v1alpha1
+kind: RayClusterFleet
+metadata:
+  name: deepseek-70b-pd-tp
+  labels:
+    app.kubernetes.io/name: aibrix
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  # Each replica = one full RayCluster with prefill + decode inside.
+  # Scale this to add more independent P/D instances.
+  replicas: 1
+
+  selector:
+    matchLabels:
+      model.aibrix.ai/name: deepseek-70b
+
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0   # never take down a cluster during update
+
+  template:
+    metadata:
+      labels:
+        model.aibrix.ai/name: deepseek-70b
+      annotations:
+        ray.io/overwrite-container-cmd: "true"
+
+    spec:
+      rayVersion: "2.10.0"
+
+      # ── Head node: prefill shard 0 ────────────────────────────
+      # Runs the Ray GCS + SGLang prefill server.
+      # Acts as rank 0 of the prefill TP group.
+      # Also runs the sglang-router as a sidecar to handle
+      # P/D routing between prefill and decode within this cluster.
+      headGroupSpec:
+        rayStartParams:
+          dashboard-host: "0.0.0.0"
+          num-cpus: "4"
+          num-gpus: "1"
+
+        template:
+          metadata:
+            labels:
+              model.aibrix.ai/name: deepseek-70b
+              model.aibrix.ai/port: "8000"
+              model.aibrix.ai/engine: sglang
+          spec:
+            containers:
+              # ── SGLang prefill server (head) ─────────────────
+              - name: ray-head
+                image: aibrix/sglang:v0.4.9.post3-cu126-nixl-v0.4.1
+                command: ["/bin/bash", "-lc", "--"]
+                args:
+                  - >
+                    ulimit -n 65536 &&
+                    pip3 install ray[default] &&
+
+                    echo "[INFO] Starting Ray head..." &&
+                    ray start --head \
+                      --num-cpus=4 \
+                      --num-gpus=1 \
+                      --dashboard-host=0.0.0.0 \
+                      --metrics-export-port=8080 \
+                      --dashboard-agent-listen-port=52365 &&
+
+                    echo "[INFO] Waiting for Ray dashboard..." &&
+                    until curl --max-time 5 --fail http://127.0.0.1:8265 > /dev/null 2>&1; do
+                      sleep 2;
+                    done &&
+
+                    echo "[INFO] Waiting for all 4 nodes to join (tp=2 prefill + tp=2 decode)..." &&
+                    until python3 -c "
+                    import ray; ray.init(address='auto', ignore_reinit_error=True)
+                    gpus = ray.cluster_resources().get('GPU', 0)
+                    assert gpus >= 4, f'Need 4 GPUs, have {gpus}'
+                    print(f'[OK] {gpus} GPUs ready')
+                    " 2>/dev/null; do
+                      sleep 5;
+                    done &&
+
+                    echo "[INFO] Starting SGLang prefill server (tp=2, nnodes=2)..." &&
+                    python3 -m sglang.launch_server \
+                      --model-path /models/DeepSeek-70B \
+                      --served-model-name deepseek-70b \
+                      --host 0.0.0.0 \
+                      --port 30000 \
+                      --disaggregation-mode prefill \
+                      --disaggregation-transfer-backend nixl \
+                      --tp-size 2 \
+                      --nnodes 2 \
+                      --node-rank 0 \
+                      --dist-init-addr $MY_POD_IP:5000 \
+                      --trust-remote-code \
+                      --mem-fraction-static 0.8 \
+                      --log-level info
+
+                env:
+                  - name: MY_POD_IP
+                    valueFrom:
+                      fieldRef:
+                        fieldPath: status.podIP
+                  - name: GLOO_SOCKET_IFNAME
+                    value: eth0
+                  - name: NCCL_SOCKET_IFNAME
+                    value: eth0
+                  - name: NCCL_IB_DISABLE
+                    value: "0"
+                  - name: NCCL_IB_GID_INDEX
+                    value: "7"
+                  - name: NCCL_DEBUG
+                    value: "WARN"
+                  - name: UCX_TLS
+                    value: ^gga
+                  - name: PYTORCH_ROCM_ARCH
+                    value: "gfx942"
+                  - name: HSA_NO_SCRATCH_RECLAIM
+                    value: "1"
+                  - name: GPU_FORCE_BLIT_COPY_SIZE
+                    value: "6"
+                  - name: HIP_FORCE_DEV_KERNARG
+                    value: "1"
+                  - name: TORCH_BLAS_PREFER_HIPBLASLT
+                    value: "1"
+
+                ports:
+                  - containerPort: 6379
+                    name: gcs-server
+                  - containerPort: 8265
+                    name: dashboard
+                  - containerPort: 10001
+                    name: client
+                  - containerPort: 30000
+                    name: prefill
+
+                resources:
+                  limits:
+                    cpu: "4"
+                    amd.com/gpu: 1
+                  requests:
+                    cpu: "4"
+                    amd.com/gpu: 1
+
+                volumeMounts:
+                  - name: model-vol
+                    mountPath: /models
+                    readOnly: true
+                  - name: shared-mem
+                    mountPath: /dev/shm
+                  - name: dev-kfd
+                    mountPath: /dev/kfd
+                  - name: dev-dri
+                    mountPath: /dev/dri
+
+              # ── sglang-router sidecar ─────────────────────────
+              # Routes requests to prefill or decode within
+              # this RayCluster. Exposes port 8000 as the
+              # single entry point for this cluster instance.
+              - name: router
+                image: aibrix/sglang-router:v0.1.6
+                command: ["sh", "-c"]
+                args:
+                  - |
+                    python3 -m sglang_router.launch_router \
+                      --pd-disaggregation \
+                      --policy random \
+                      --prefill-url http://localhost:30000 \
+                      --decode-url http://localhost:30001 \
+                      --host 0.0.0.0 \
+                      --port 8000
+                ports:
+                  - containerPort: 8000
+                    name: serve
+                resources:
+                  limits:
+                    cpu: "2"
+                    memory: "4Gi"
+                  requests:
+                    cpu: "1"
+                    memory: "2Gi"
+
+              # ── AIBrix runtime sidecar ────────────────────────
+              - name: aibrix-runtime
+                image: aibrix/runtime:v0.6.0
+                command:
+                  - aibrix_runtime
+                  - --port
+                  - "8080"
+                env:
+                  - name: INFERENCE_ENGINE
+                    value: sglang
+                  - name: INFERENCE_ENGINE_ENDPOINT
+                    value: http://localhost:8000
+                  - name: PYTORCH_ROCM_ARCH
+                    value: "gfx942"
+                ports:
+                  - containerPort: 8080
+                    protocol: TCP
+                livenessProbe:
+                  httpGet:
+                    path: /healthz
+                    port: 8080
+                  initialDelaySeconds: 3
+                  periodSeconds: 2
+                readinessProbe:
+                  httpGet:
+                    path: /ready
+                    port: 8080
+                  initialDelaySeconds: 5
+                  periodSeconds: 10
+                resources:
+                  limits:
+                    cpu: "1"
+                  requests:
+                    cpu: "1"
+
+            volumes:
+              - name: model-vol
+                hostPath:
+                  path: /data01/models
+                  type: Directory
+              - name: shared-mem
+                emptyDir:
+                  medium: Memory
+                  sizeLimit: 32Gi
+              - name: dev-kfd
+                hostPath:
+                  path: /dev/kfd
+              - name: dev-dri
+                hostPath:
+                  path: /dev/dri
+
+      workerGroupSpecs:
+        # ── Worker group 1: prefill shard 1 ───────────────────
+        - groupName: prefill-worker
+          replicas: 1
+          minReplicas: 1
+          maxReplicas: 1
+          rayStartParams:
+            num-cpus: "4"
+            num-gpus: "1"
+          template:
+            spec:
+              containers:
+                - name: prefill-worker
+                  image: aibrix/sglang:v0.4.9.post3-cu126-nixl-v0.4.1
+                  command: ["/bin/bash", "-lc", "--"]
+                  args:
+                    - >
+                      ulimit -n 65536 &&
+                      sleep 10 &&
+                      eval "$KUBERAY_GEN_RAY_START_CMD --node-ip-address=$MY_POD_IP" &&
+
+                      echo "[INFO] Starting SGLang prefill worker (tp=2, node rank 1)..." &&
+                      python3 -m sglang.launch_server \
+                        --model-path /models/DeepSeek-70B \
+                        --served-model-name deepseek-70b \
+                        --host 0.0.0.0 \
+                        --port 30000 \
+                        --disaggregation-mode prefill \
+                        --disaggregation-transfer-backend nixl \
+                        --tp-size 2 \
+                        --nnodes 2 \
+                        --node-rank 1 \
+                        --dist-init-addr $HEAD_POD_IP:5000 \
+                        --trust-remote-code \
+                        --mem-fraction-static 0.8 \
+                        --log-level info
+
+                  env:
+                    - name: MY_POD_IP
+                      valueFrom:
+                        fieldRef:
+                          fieldPath: status.podIP
+                    - name: HEAD_POD_IP
+                      valueFrom:
+                        fieldRef:
+                          fieldPath: status.hostIP   # adjust based on your cluster DNS
+                    - name: GLOO_SOCKET_IFNAME
+                      value: eth0
+                    - name: NCCL_SOCKET_IFNAME
+                      value: eth0
+                    - name: NCCL_IB_DISABLE
+                      value: "0"
+                    - name: NCCL_IB_GID_INDEX
+                      value: "7"
+                    - name: PYTORCH_ROCM_ARCH
+                      value: "gfx942"
+                    - name: HSA_NO_SCRATCH_RECLAIM
+                      value: "1"
+                    - name: GPU_FORCE_BLIT_COPY_SIZE
+                      value: "6"
+                    - name: HIP_FORCE_DEV_KERNARG
+                      value: "1"
+                    - name: TORCH_BLAS_PREFER_HIPBLASLT
+                      value: "1"
+
+                  lifecycle:
+                    preStop:
+                      exec:
+                        command: ["/bin/sh", "-c", "ray stop"]
+
+                  resources:
+                    limits:
+                      cpu: "4"
+                      amd.com/gpu: 1
+                    requests:
+                      cpu: "4"
+                      amd.com/gpu: 1
+
+                  volumeMounts:
+                    - name: model-vol
+                      mountPath: /models
+                      readOnly: true
+                    - name: shared-mem
+                      mountPath: /dev/shm
+                    - name: dev-kfd
+                      mountPath: /dev/kfd
+                    - name: dev-dri
+                      mountPath: /dev/dri
+
+              volumes:
+                - name: model-vol
+                  hostPath:
+                    path: /data01/models
+                    type: Directory
+                - name: shared-mem
+                  emptyDir:
+                    medium: Memory
+                    sizeLimit: 32Gi
+                - name: dev-kfd
+                  hostPath:
+                    path: /dev/kfd
+                - name: dev-dri
+                  hostPath:
+                    path: /dev/dri
+
+        # ── Worker group 2: decode shard 0 ────────────────────
+        - groupName: decode-worker-0
+          replicas: 1
+          minReplicas: 1
+          maxReplicas: 1
+          rayStartParams:
+            num-cpus: "4"
+            num-gpus: "1"
+          template:
+            spec:
+              containers:
+                - name: decode-worker-0
+                  image: aibrix/sglang:v0.4.9.post3-cu126-nixl-v0.4.1
+                  command: ["/bin/bash", "-lc", "--"]
+                  args:
+                    - >
+                      ulimit -n 65536 &&
+                      sleep 10 &&
+                      eval "$KUBERAY_GEN_RAY_START_CMD --node-ip-address=$MY_POD_IP" &&
+
+                      echo "[INFO] Starting SGLang decode server (tp=2, node rank 0)..." &&
+                      python3 -m sglang.launch_server \
+                        --model-path /models/DeepSeek-70B \
+                        --served-model-name deepseek-70b \
+                        --host 0.0.0.0 \
+                        --port 30001 \
+                        --disaggregation-mode decode \
+                        --disaggregation-transfer-backend nixl \
+                        --tp-size 2 \
+                        --nnodes 2 \
+                        --node-rank 0 \
+                        --dist-init-addr $MY_POD_IP:5001 \
+                        --trust-remote-code \
+                        --mem-fraction-static 0.8 \
+                        --log-level info
+
+                  env:
+                    - name: MY_POD_IP
+                      valueFrom:
+                        fieldRef:
+                          fieldPath: status.podIP
+                    - name: GLOO_SOCKET_IFNAME
+                      value: eth0
+                    - name: NCCL_SOCKET_IFNAME
+                      value: eth0
+                    - name: NCCL_IB_DISABLE
+                      value: "0"
+                    - name: NCCL_IB_GID_INDEX
+                      value: "7"
+                    - name: PYTORCH_ROCM_ARCH
+                      value: "gfx942"
+                    - name: HSA_NO_SCRATCH_RECLAIM
+                      value: "1"
+                    - name: GPU_FORCE_BLIT_COPY_SIZE
+                      value: "6"
+                    - name: HIP_FORCE_DEV_KERNARG
+                      value: "1"
+                    - name: TORCH_BLAS_PREFER_HIPBLASLT
+                      value: "1"
+
+                  lifecycle:
+                    preStop:
+                      exec:
+                        command: ["/bin/sh", "-c", "ray stop"]
+
+                  resources:
+                    limits:
+                      cpu: "4"
+                      amd.com/gpu: 1
+                    requests:
+                      cpu: "4"
+                      amd.com/gpu: 1
+
+                  volumeMounts:
+                    - name: model-vol
+                      mountPath: /models
+                      readOnly: true
+                    - name: shared-mem
+                      mountPath: /dev/shm
+                    - name: dev-kfd
+                      mountPath: /dev/kfd
+                    - name: dev-dri
+                      mountPath: /dev/dri
+
+              volumes:
+                - name: model-vol
+                  hostPath:
+                    path: /data01/models
+                    type: Directory
+                - name: shared-mem
+                  emptyDir:
+                    medium: Memory
+                    sizeLimit: 32Gi
+                - name: dev-kfd
+                  hostPath:
+                    path: /dev/kfd
+                - name: dev-dri
+                  hostPath:
+                    path: /dev/dri
+
+        # ── Worker group 3: decode shard 1 ────────────────────
+        - groupName: decode-worker-1
+          replicas: 1
+          minReplicas: 1
+          maxReplicas: 1
+          rayStartParams:
+            num-cpus: "4"
+            num-gpus: "1"
+          template:
+            spec:
+              containers:
+                - name: decode-worker-1
+                  image: aibrix/sglang:v0.4.9.post3-cu126-nixl-v0.4.1
+                  command: ["/bin/bash", "-lc", "--"]
+                  args:
+                    - >
+                      ulimit -n 65536 &&
+                      sleep 10 &&
+                      eval "$KUBERAY_GEN_RAY_START_CMD --node-ip-address=$MY_POD_IP" &&
+
+                      echo "[INFO] Starting SGLang decode worker (tp=2, node rank 1)..." &&
+                      python3 -m sglang.launch_server \
+                        --model-path /models/DeepSeek-70B \
+                        --served-model-name deepseek-70b \
+                        --host 0.0.0.0 \
+                        --port 30001 \
+                        --disaggregation-mode decode \
+                        --disaggregation-transfer-backend nixl \
+                        --tp-size 2 \
+                        --nnodes 2 \
+                        --node-rank 1 \
+                        --dist-init-addr $DECODE_HEAD_IP:5001 \
+                        --trust-remote-code \
+                        --mem-fraction-static 0.8 \
+                        --log-level info
+
+                  env:
+                    - name: MY_POD_IP
+                      valueFrom:
+                        fieldRef:
+                          fieldPath: status.podIP
+                    - name: DECODE_HEAD_IP   # IP of decode-worker-0, needs to be resolved
+                      value: "$(DECODE_WORKER_0_IP)"
+                    - name: GLOO_SOCKET_IFNAME
+                      value: eth0
+                    - name: NCCL_SOCKET_IFNAME
+                      value: eth0
+                    - name: NCCL_IB_DISABLE
+                      value: "0"
+                    - name: NCCL_IB_GID_INDEX
+                      value: "7"
+                    - name: PYTORCH_ROCM_ARCH
+                      value: "gfx942"
+                    - name: HSA_NO_SCRATCH_RECLAIM
+                      value: "1"
+                    - name: GPU_FORCE_BLIT_COPY_SIZE
+                      value: "6"
+                    - name: HIP_FORCE_DEV_KERNARG
+                      value: "1"
+                    - name: TORCH_BLAS_PREFER_HIPBLASLT
+                      value: "1"
+
+                  lifecycle:
+                    preStop:
+                      exec:
+                        command: ["/bin/sh", "-c", "ray stop"]
+
+                  resources:
+                    limits:
+                      cpu: "4"
+                      amd.com/gpu: 1
+                    requests:
+                      cpu: "4"
+                      amd.com/gpu: 1
+
+                  volumeMounts:
+                    - name: model-vol
+                      mountPath: /models
+                      readOnly: true
+                    - name: shared-mem
+                      mountPath: /dev/shm
+                    - name: dev-kfd
+                      mountPath: /dev/kfd
+                    - name: dev-dri
+                      mountPath: /dev/dri
+
+              volumes:
+                - name: model-vol
+                  hostPath:
+                    path: /data01/models
+                    type: Directory
+                - name: shared-mem
+                  emptyDir:
+                    medium: Memory
+                    sizeLimit: 32Gi
+                - name: dev-kfd
+                  hostPath:
+                    path: /dev/kfd
+                - name: dev-dri
+                  hostPath:
+                    path: /dev/dri
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: deepseek-70b-pd-tp
+  namespace: default
+  labels:
+    model.aibrix.ai/name: deepseek-70b
+    prometheus-discovery: "true"
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "8080"
+spec:
+  selector:
+    model.aibrix.ai/name: deepseek-70b
+  ports:
+    - name: serve       # router entry point
+      port: 8000
+      targetPort: 8000
+    - name: runtime     # aibrix runtime metrics
+      port: 8080
+      targetPort: 8080
+
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: deepseek-70b-pd-tp-route
+  namespace: aibrix-system
+spec:
+  parentRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: aibrix-eg
+      namespace: aibrix-system
+  rules:
+    - backendRefs:
+        - group: ""
+          kind: Service
+          name: deepseek-70b-pd-tp
+          namespace: default
+          port: 8000
+          weight: 1
+      matches:
+        - headers:
+            - name: model
+              type: Exact
+              value: deepseek-70b
+          path:
+            type: PathPrefix
+            value: /v1/chat/completions
+        - headers:
+            - name: model
+              type: Exact
+              value: deepseek-70b
+          path:
+            type: PathPrefix
+            value: /v1/completions
+      timeouts:
+        request: 300s
+
+# ================================================================
+# IMPORTANT CAVEAT
+#
+# The decode worker IP resolution (DECODE_HEAD_IP) is the hardest
+# part of this setup. Worker pods don't know each other's IPs at
+# startup. You have two options:
+#
+# Option 1: Use a headless Service per worker group so pods can
+#           resolve each other by DNS name.
+#
+# Option 2: Use an init container that waits for the decode-worker-0
+#           pod IP to be available via the Kubernetes API before
+#           starting the decode-worker-1 process.
+#
+# This is exactly the coordination gap that StormService solves
+# for single-GPU pods via stable pod indexes. For multi-node,
+# this coordination needs to be handled manually or via Ray's
+# own node discovery (which is why Ray is useful here).
+# ================================================================
+
+
+# ================================================================
+# RayClusterFleet: TP + P/D Disaggregation
+#
+# Node layout (1 GPU per node, AMD MI300X):
+#   main           → head pod        (prefill rank 0)
+#   eight-node     → prefill-worker  (prefill rank 1)
+#   thirthteen-node  → decode-worker-0 (decode  rank 0)
+#   fourthteen-node  → decode-worker-1 (decode  rank 1)
+#
+# PREREQS:
+#   - KubeRay operator installed
+#   - AIBrix operator installed
+#   - RDMA networking between nodes
+#   - Model weights at /data01/models on each node
+# ================================================================
+
+---
+# Headless service so decode-worker-1 can resolve
+# decode-worker-0 by DNS instead of hardcoded IP.
+apiVersion: v1
+kind: Service
+metadata:
+  name: deepseek-decode-headless
+  namespace: default
+spec:
+  clusterIP: None
+  selector:
+    ray-worker-group: decode-worker-0
+  ports:
+    - port: 5001
+      name: dist-init
+
+---
+apiVersion: orchestration.aibrix.ai/v1alpha1
+kind: RayClusterFleet
+metadata:
+  name: deepseek-70b-pd-tp
+  labels:
+    app.kubernetes.io/name: aibrix
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      model.aibrix.ai/name: deepseek-70b
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        model.aibrix.ai/name: deepseek-70b
+      annotations:
+        ray.io/overwrite-container-cmd: "true"
+    spec:
+      rayVersion: "2.10.0"
+
+      # ── main → prefill rank 0 ──────────────────────────────────
+      headGroupSpec:
+        rayStartParams:
+          dashboard-host: "0.0.0.0"
+          num-cpus: "4"
+          num-gpus: "1"
+        template:
+          metadata:
+            labels:
+              model.aibrix.ai/name: deepseek-70b
+              model.aibrix.ai/port: "8000"
+              model.aibrix.ai/engine: sglang
+          spec:
+            nodeSelector:
+              kubernetes.io/hostname: main
+            containers:
+              - name: ray-head
+                image: lmsysorg/sglang:v0.5.8-rocm700-mi30x
+                command: ["/bin/bash", "-lc", "--"]
+                args:
+                  - >
+                    ulimit -n 65536 &&
+                    pip3 install ray[default] &&
+
+                    ray start --head \
+                      --num-cpus=4 \
+                      --num-gpus=1 \
+                      --dashboard-host=0.0.0.0 \
+                      --metrics-export-port=8080 \
+                      --dashboard-agent-listen-port=52365 &&
+
+                    until curl --max-time 5 --fail http://127.0.0.1:8265 > /dev/null 2>&1; do
+                      sleep 2;
+                    done &&
+                    echo "[OK] Ray dashboard ready" &&
+
+                    until python3 -c "
+                    import ray; ray.init(address='auto', ignore_reinit_error=True)
+                    gpus = ray.cluster_resources().get('GPU', 0)
+                    assert gpus >= 4, f'Need 4 GPUs, have {gpus}'
+                    print(f'[OK] {gpus} GPUs in cluster')
+                    " 2>/dev/null; do
+                      echo "[WAIT] Waiting for all 4 nodes..."; sleep 5;
+                    done &&
+
+                    python3 -m sglang.launch_server \
+                      --model-path /models/DeepSeek-70B \
+                      --served-model-name deepseek-70b \
+                      --host 0.0.0.0 \
+                      --port 30000 \
+                      --disaggregation-mode prefill \
+                      ----disaggregation-transfer-backend mooncake \
+                      --tp-size 2 \
+                      --nnodes 2 \
+                      --node-rank 0 \
+                      --dist-init-addr $MY_POD_IP:5000 \
+                      --trust-remote-code \
+                      --mem-fraction-static 0.8 \
+                      --log-level info
+                env:
+                  - name: MY_POD_IP
+                    valueFrom:
+                      fieldRef:
+                        fieldPath: status.podIP
+                  - name: GLOO_SOCKET_IFNAME
+                    value: eth0
+                  - name: NCCL_SOCKET_IFNAME
+                    value: eth0
+                  - name: NCCL_IB_DISABLE
+                    value: "0"
+                  - name: NCCL_IB_GID_INDEX
+                    value: "7"
+                  - name: NCCL_DEBUG
+                    value: "WARN"
+                  - name: UCX_TLS
+                    value: ^gga
+                  - name: PYTORCH_ROCM_ARCH
+                    value: "gfx942"
+                  - name: HSA_NO_SCRATCH_RECLAIM
+                    value: "1"
+                  - name: GPU_FORCE_BLIT_COPY_SIZE
+                    value: "6"
+                  - name: HIP_FORCE_DEV_KERNARG
+                    value: "1"
+                  - name: TORCH_BLAS_PREFER_HIPBLASLT
+                    value: "1"
+                ports:
+                  - containerPort: 6379
+                    name: gcs-server
+                  - containerPort: 8265
+                    name: dashboard
+                  - containerPort: 10001
+                    name: client
+                  - containerPort: 30000
+                    name: prefill
+                resources:
+                  limits:
+                    cpu: "4"
+                    amd.com/gpu: 1
+                  requests:
+                    cpu: "4"
+                    amd.com/gpu: 1
+                volumeMounts:
+                  - name: model-vol
+                    mountPath: /models
+                    readOnly: true
+                  - name: shared-mem
+                    mountPath: /dev/shm
+                  - name: dev-kfd
+                    mountPath: /dev/kfd
+                  - name: dev-dri
+                    mountPath: /dev/dri
+
+              # ── sglang-router sidecar ─────────────────────────
+              - name: router
+                image: aibrix/sglang-router:v0.1.6
+                command: ["sh", "-c"]
+                args:
+                  - |
+                    python3 -m sglang_router.launch_router \
+                      --pd-disaggregation \
+                      --policy random \
+                      --prefill http://localhost:30000 9999 \
+                      --decode http://localhost:30001 \
+                      --host 0.0.0.0 \
+                      --port 8000
+                ports:
+                  - containerPort: 8000
+                    name: serve
+                resources:
+                  limits:
+                    cpu: "2"
+                    memory: "4Gi"
+                  requests:
+                    cpu: "1"
+                    memory: "2Gi"
+
+              # # ── AIBrix runtime sidecar ────────────────────────
+              # - name: aibrix-runtime
+              #   image: aibrix/runtime:v0.6.0
+              #   command:
+              #     - aibrix_runtime
+              #     - --port
+              #     - "8080"
+              #   env:
+              #     - name: INFERENCE_ENGINE
+              #       value: sglang
+              #     - name: INFERENCE_ENGINE_ENDPOINT
+              #       value: http://localhost:8000
+              #     - name: PYTORCH_ROCM_ARCH
+              #       value: "gfx942"
+              #   ports:
+              #     - containerPort: 8080
+              #       protocol: TCP
+              #   livenessProbe:
+              #     httpGet:
+              #       path: /healthz
+              #       port: 8080
+              #     initialDelaySeconds: 3
+              #     periodSeconds: 2
+              #   readinessProbe:
+              #     httpGet:
+              #       path: /ready
+              #       port: 8080
+              #     initialDelaySeconds: 5
+              #     periodSeconds: 10
+              #   resources:
+              #     limits:
+              #       cpu: "1"
+              #     requests:
+              #       cpu: "1"
+
+            volumes:
+              - name: model-vol
+                hostPath:
+                  path: /data01/models
+                  type: Directory
+              - name: shared-mem
+                emptyDir:
+                  medium: Memory
+                  sizeLimit: 32Gi
+              - name: dev-kfd
+                hostPath:
+                  path: /dev/kfd
+              - name: dev-dri
+                hostPath:
+                  path: /dev/dri
+
+      workerGroupSpecs:
+        # ── eight-node → prefill rank 1 ───────────────────────
+        - groupName: prefill-worker
+          replicas: 1
+          minReplicas: 1
+          maxReplicas: 1
+          rayStartParams:
+            num-cpus: "4"
+            num-gpus: "1"
+          template:
+            spec:
+              nodeSelector:
+                kubernetes.io/hostname: eight-node
+              containers:
+                - name: prefill-worker
+                  image: lmsysorg/sglang:v0.5.8-rocm700-mi30x
+                  command: ["/bin/bash", "-lc", "--"]
+                  args:
+                    - >
+                      ulimit -n 65536 &&
+                      sleep 10 &&
+                      eval "$KUBERAY_GEN_RAY_START_CMD --node-ip-address=$MY_POD_IP" &&
+
+                      python3 -m sglang.launch_server \
+                        --model-path /models/DeepSeek-70B \
+                        --served-model-name deepseek-70b \
+                        --host 0.0.0.0 \
+                        --port 30000 \
+                        --disaggregation-mode prefill \
+                        ----disaggregation-transfer-backend mooncake \
+                        --tp-size 2 \
+                        --nnodes 2 \
+                        --node-rank 1 \
+                        --dist-init-addr deepseek-70b-pd-tp-head-svc:5000 \
+                        --trust-remote-code \
+                        --mem-fraction-static 0.8 \
+                        --log-level info
+                  env:
+                    - name: MY_POD_IP
+                      valueFrom:
+                        fieldRef:
+                          fieldPath: status.podIP
+                    - name: GLOO_SOCKET_IFNAME
+                      value: eth0
+                    - name: NCCL_SOCKET_IFNAME
+                      value: eth0
+                    - name: NCCL_IB_DISABLE
+                      value: "0"
+                    - name: NCCL_IB_GID_INDEX
+                      value: "7"
+                    - name: NCCL_DEBUG
+                      value: "WARN"
+                    - name: UCX_TLS
+                      value: ^gga
+                    - name: PYTORCH_ROCM_ARCH
+                      value: "gfx942"
+                    - name: HSA_NO_SCRATCH_RECLAIM
+                      value: "1"
+                    - name: GPU_FORCE_BLIT_COPY_SIZE
+                      value: "6"
+                    - name: HIP_FORCE_DEV_KERNARG
+                      value: "1"
+                    - name: TORCH_BLAS_PREFER_HIPBLASLT
+                      value: "1"
+                  lifecycle:
+                    preStop:
+                      exec:
+                        command: ["/bin/sh", "-c", "ray stop"]
+                  resources:
+                    limits:
+                      cpu: "4"
+                      amd.com/gpu: 1
+                    requests:
+                      cpu: "4"
+                      amd.com/gpu: 1
+                  volumeMounts:
+                    - name: model-vol
+                      mountPath: /models
+                      readOnly: true
+                    - name: shared-mem
+                      mountPath: /dev/shm
+                    - name: dev-kfd
+                      mountPath: /dev/kfd
+                    - name: dev-dri
+                      mountPath: /dev/dri
+              volumes:
+                - name: model-vol
+                  hostPath:
+                    path: /data01/models
+                    type: Directory
+                - name: shared-mem
+                  emptyDir:
+                    medium: Memory
+                    sizeLimit: 32Gi
+                - name: dev-kfd
+                  hostPath:
+                    path: /dev/kfd
+                - name: dev-dri
+                  hostPath:
+                    path: /dev/dri
+
+        # ── thirthteen-node → decode rank 0 ─────────────────────
+        - groupName: decode-worker-0
+          replicas: 1
+          minReplicas: 1
+          maxReplicas: 1
+          rayStartParams:
+            num-cpus: "4"
+            num-gpus: "1"
+          template:
+            metadata:
+              labels:
+                ray-worker-group: decode-worker-0   # used by headless service
+            spec:
+              nodeSelector:
+                kubernetes.io/hostname: thirthteen-node
+              containers:
+                - name: decode-worker-0
+                  image: lmsysorg/sglang:v0.5.8-rocm700-mi30x
+                  command: ["/bin/bash", "-lc", "--"]
+                  args:
+                    - >
+                      ulimit -n 65536 &&
+                      sleep 10 &&
+                      eval "$KUBERAY_GEN_RAY_START_CMD --node-ip-address=$MY_POD_IP" &&
+
+                      python3 -m sglang.launch_server \
+                        --model-path /models/DeepSeek-70B \
+                        --served-model-name deepseek-70b \
+                        --host 0.0.0.0 \
+                        --port 30001 \
+                        --disaggregation-mode decode \
+                        ----disaggregation-transfer-backend mooncake \
+                        --tp-size 2 \
+                        --nnodes 2 \
+                        --node-rank 0 \
+                        --dist-init-addr $MY_POD_IP:5001 \
+                        --trust-remote-code \
+                        --mem-fraction-static 0.8 \
+                        --log-level info
+                  env:
+                    - name: MY_POD_IP
+                      valueFrom:
+                        fieldRef:
+                          fieldPath: status.podIP
+                    - name: GLOO_SOCKET_IFNAME
+                      value: eth0
+                    - name: NCCL_SOCKET_IFNAME
+                      value: eth0
+                    - name: NCCL_IB_DISABLE
+                      value: "0"
+                    - name: NCCL_IB_GID_INDEX
+                      value: "7"
+                    - name: NCCL_DEBUG
+                      value: "WARN"
+                    - name: UCX_TLS
+                      value: ^gga
+                    - name: PYTORCH_ROCM_ARCH
+                      value: "gfx942"
+                    - name: HSA_NO_SCRATCH_RECLAIM
+                      value: "1"
+                    - name: GPU_FORCE_BLIT_COPY_SIZE
+                      value: "6"
+                    - name: HIP_FORCE_DEV_KERNARG
+                      value: "1"
+                    - name: TORCH_BLAS_PREFER_HIPBLASLT
+                      value: "1"
+                  lifecycle:
+                    preStop:
+                      exec:
+                        command: ["/bin/sh", "-c", "ray stop"]
+                  resources:
+                    limits:
+                      cpu: "4"
+                      amd.com/gpu: 1
+                    requests:
+                      cpu: "4"
+                      amd.com/gpu: 1
+                  volumeMounts:
+                    - name: model-vol
+                      mountPath: /models
+                      readOnly: true
+                    - name: shared-mem
+                      mountPath: /dev/shm
+                    - name: dev-kfd
+                      mountPath: /dev/kfd
+                    - name: dev-dri
+                      mountPath: /dev/dri
+              volumes:
+                - name: model-vol
+                  hostPath:
+                    path: /data01/models
+                    type: Directory
+                - name: shared-mem
+                  emptyDir:
+                    medium: Memory
+                    sizeLimit: 32Gi
+                - name: dev-kfd
+                  hostPath:
+                    path: /dev/kfd
+                - name: dev-dri
+                  hostPath:
+                    path: /dev/dri
+
+        # ── fourthteen-node → decode rank 1 ─────────────────────
+        - groupName: decode-worker-1
+          replicas: 1
+          minReplicas: 1
+          maxReplicas: 1
+          rayStartParams:
+            num-cpus: "4"
+            num-gpus: "1"
+          template:
+            spec:
+              nodeSelector:
+                kubernetes.io/hostname: fourthteen-node
+              containers:
+                - name: decode-worker-1
+                  image: lmsysorg/sglang:v0.5.8-rocm700-mi30x
+                  command: ["/bin/bash", "-lc", "--"]
+                  args:
+                    - >
+                      ulimit -n 65536 &&
+                      sleep 15 &&
+                      eval "$KUBERAY_GEN_RAY_START_CMD --node-ip-address=$MY_POD_IP" &&
+
+                      echo "[INFO] Waiting for decode-worker-0 DNS..." &&
+                      until nslookup deepseek-decode-headless.default.svc.cluster.local > /dev/null 2>&1; do
+                        sleep 3;
+                      done &&
+                      echo "[OK] decode-worker-0 reachable via DNS" &&
+
+                      python3 -m sglang.launch_server \
+                        --model-path /models/DeepSeek-70B \
+                        --served-model-name deepseek-70b \
+                        --host 0.0.0.0 \
+                        --port 30001 \
+                        --disaggregation-mode decode \
+                        ----disaggregation-transfer-backend mooncake \
+                        --tp-size 2 \
+                        --nnodes 2 \
+                        --node-rank 1 \
+                        --dist-init-addr deepseek-decode-headless.default.svc.cluster.local:5001 \
+                        --trust-remote-code \
+                        --mem-fraction-static 0.8 \
+                        --log-level info
+                  env:
+                    - name: MY_POD_IP
+                      valueFrom:
+                        fieldRef:
+                          fieldPath: status.podIP
+                    - name: GLOO_SOCKET_IFNAME
+                      value: eth0
+                    - name: NCCL_SOCKET_IFNAME
+                      value: eth0
+                    - name: NCCL_IB_DISABLE
+                      value: "0"
+                    - name: NCCL_IB_GID_INDEX
+                      value: "7"
+                    - name: NCCL_DEBUG
+                      value: "WARN"
+                    - name: UCX_TLS
+                      value: ^gga
+                    - name: PYTORCH_ROCM_ARCH
+                      value: "gfx942"
+                    - name: HSA_NO_SCRATCH_RECLAIM
+                      value: "1"
+                    - name: GPU_FORCE_BLIT_COPY_SIZE
+                      value: "6"
+                    - name: HIP_FORCE_DEV_KERNARG
+                      value: "1"
+                    - name: TORCH_BLAS_PREFER_HIPBLASLT
+                      value: "1"
+                  lifecycle:
+                    preStop:
+                      exec:
+                        command: ["/bin/sh", "-c", "ray stop"]
+                  resources:
+                    limits:
+                      cpu: "4"
+                      amd.com/gpu: 1
+                    requests:
+                      cpu: "4"
+                      amd.com/gpu: 1
+                  volumeMounts:
+                    - name: model-vol
+                      mountPath: /models
+                      readOnly: true
+                    - name: shared-mem
+                      mountPath: /dev/shm
+                    - name: dev-kfd
+                      mountPath: /dev/kfd
+                    - name: dev-dri
+                      mountPath: /dev/dri
+              volumes:
+                - name: model-vol
+                  hostPath:
+                    path: /data01/models
+                    type: Directory
+                - name: shared-mem
+                  emptyDir:
+                    medium: Memory
+                    sizeLimit: 32Gi
+                - name: dev-kfd
+                  hostPath:
+                    path: /dev/kfd
+                - name: dev-dri
+                  hostPath:
+                    path: /dev/dri
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: deepseek-70b-pd-tp
+  namespace: default
+  labels:
+    model.aibrix.ai/name: deepseek-70b
+    prometheus-discovery: "true"
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "8080"
+spec:
+  selector:
+    model.aibrix.ai/name: deepseek-70b
+  ports:
+    - name: serve
+      port: 8000
+      targetPort: 8000
+    - name: runtime
+      port: 8080
+      targetPort: 8080
+
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: deepseek-70b-pd-tp-route
+  namespace: aibrix-system
+spec:
+  parentRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: aibrix-eg
+      namespace: aibrix-system
+  rules:
+    - backendRefs:
+        - group: ""
+          kind: Service
+          name: deepseek-70b-pd-tp
+          namespace: default
+          port: 8000
+          weight: 1
+      matches:
+        - headers:
+            - name: model
+              type: Exact
+              value: deepseek-70b
+          path:
+            type: PathPrefix
+            value: /v1/chat/completions
+        - headers:
+            - name: model
+              type: Exact
+              value: deepseek-70b
+          path:
+            type: PathPrefix
+            value: /v1/completions
+      timeouts:
+        request: 300s
+
+
+
+
+# ================================================================
+# RayClusterFleet: TP=2 + P/D Disaggregation
+# Model: deepseek-ai/DeepSeek-R1-Distill-Llama-70B (~140GB)
+#
+# Node layout (1x AMD MI300X per node):
+#   main              → head pod         (prefill rank 0)
+#   eight-node        → prefill-worker   (prefill rank 1)
+#   thirthteen-node   → decode-worker-0  (decode  rank 0)
+#   fourthteen-node   → decode-worker-1  (decode  rank 1)
+#
+# Prefill group: main + eight-node        (tp=2, one model copy)
+# Decode  group: thirthteen + fourthteen  (tp=2, one model copy)
+#
+# Router: standalone pod on main, points to real service IPs
+#
+# Model auto-downloads from HuggingFace on first start.
+# Each node needs ~140GB free in /data01/models/
+# ================================================================
+
+---
+# Headless service: decode-worker-1 resolves decode-worker-0 via DNS
+apiVersion: v1
+kind: Service
+metadata:
+  name: deepseek-decode-headless
+  namespace: default
+spec:
+  clusterIP: None
+  selector:
+    ray-worker-group: decode-worker-0
+  ports:
+    - port: 5001
+      name: dist-init
+
+---
+# Stable ClusterIP service pointing at prefill (head pod)
+apiVersion: v1
+kind: Service
+metadata:
+  name: deepseek-prefill-svc
+  namespace: default
+spec:
+  selector:
+    ray-node-type: head
+    model.aibrix.ai/name: deepseek-r1-70b
+  ports:
+    - name: prefill
+      port: 30000
+      targetPort: 30000
+
+---
+# Stable ClusterIP service pointing at decode-worker-0
+apiVersion: v1
+kind: Service
+metadata:
+  name: deepseek-decode-svc
+  namespace: default
+spec:
+  selector:
+    ray-worker-group: decode-worker-0
+  ports:
+    - name: decode
+      port: 30001
+      targetPort: 30001
+
+---
+# Standalone router pod — routes prefill/decode across nodes
+apiVersion: v1
+kind: Pod
+metadata:
+  name: deepseek-pd-router
+  namespace: default
+  labels:
+    app: deepseek-pd-router
+    model.aibrix.ai/name: deepseek-r1-70b
+    model.aibrix.ai/port: "8000"
+spec:
+  nodeSelector:
+    kubernetes.io/hostname: main
+  containers:
+    - name: router
+      image: aibrix/sglang-router:v0.1.6
+      command: ["sh", "-c"]
+      args:
+        - |
+          echo "[INFO] Waiting for prefill service..." &&
+          until curl --max-time 5 --fail --silent http://deepseek-prefill-svc.default.svc.cluster.local:30000/health > /dev/null 2>&1; do
+            echo "[WAIT] prefill not ready..."; sleep 10;
+          done &&
+          echo "[OK] prefill ready" &&
+
+          echo "[INFO] Waiting for decode service..." &&
+          until curl --max-time 5 --fail --silent http://deepseek-decode-svc.default.svc.cluster.local:30001/health > /dev/null 2>&1; do
+            echo "[WAIT] decode not ready..."; sleep 10;
+          done &&
+          echo "[OK] decode ready" &&
+
+          python3 -m sglang_router.launch_router \
+            --pd-disaggregation \
+            --policy random \
+            --prefill http://deepseek-prefill-svc.default.svc.cluster.local:30000 9999 \
+            --decode http://deepseek-decode-svc.default.svc.cluster.local:30001 \
+            --host 0.0.0.0 \
+            --port 8000
+      ports:
+        - containerPort: 8000
+          name: serve
+      resources:
+        limits:
+          cpu: "2"
+          memory: "4Gi"
+        requests:
+          cpu: "1"
+          memory: "2Gi"
+
+---
+apiVersion: orchestration.aibrix.ai/v1alpha1
+kind: RayClusterFleet
+metadata:
+  name: deepseek-r1-70b-pd-tp
+  labels:
+    app.kubernetes.io/name: aibrix
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      model.aibrix.ai/name: deepseek-r1-70b
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        model.aibrix.ai/name: deepseek-r1-70b
+      annotations:
+        ray.io/overwrite-container-cmd: "true"
+    spec:
+      rayVersion: "2.10.0"
+
+      # ── main → prefill rank 0 ──────────────────────────────────
+      headGroupSpec:
+        rayStartParams:
+          dashboard-host: "0.0.0.0"
+          num-cpus: "4"
+          num-gpus: "1"
+        template:
+          metadata:
+            labels:
+              model.aibrix.ai/name: deepseek-r1-70b
+              ray-node-type: head
+          spec:
+            nodeSelector:
+              kubernetes.io/hostname: main
+            containers:
+              - name: ray-head
+                image: lmsysorg/sglang:v0.5.8-rocm700-mi30x
+                command: ["/bin/bash", "-lc", "--"]
+                args:
+                  - >
+                    ulimit -n 65536 &&
+
+                    ray start --head \
+                      --num-cpus=4 \
+                      --num-gpus=1 \
+                      --dashboard-host=0.0.0.0 \
+                      --metrics-export-port=8080 \
+                      --dashboard-agent-listen-port=52365 &&
+
+                    until curl --max-time 5 --fail http://127.0.0.1:8265 > /dev/null 2>&1; do
+                      sleep 2;
+                    done &&
+                    echo "[OK] Ray dashboard ready" &&
+
+                    until python3 -c "import ray; ray.init(address='auto', ignore_reinit_error=True); assert ray.cluster_resources().get('GPU',0) >= 4" 2>/dev/null; do
+                      echo "[WAIT] Waiting for all 4 GPUs..."; sleep 5;
+                    done &&
+                    echo "[OK] All 4 GPUs ready" &&
+
+                    python3 -m sglang.launch_server \
+                      --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-70B \
+                      --served-model-name deepseek-r1-70b \
+                      --host 0.0.0.0 \
+                      --port 30000 \
+                      --disaggregation-mode prefill \
+                      --disaggregation-transfer-backend mooncake \
+                      --tp-size 2 \
+                      --nnodes 2 \
+                      --node-rank 0 \
+                      --dist-init-addr $MY_POD_IP:5000 \
+                      --trust-remote-code \
+                      --mem-fraction-static 0.8 \
+                      --log-level info
+                env:
+                  - name: MY_POD_IP
+                    valueFrom:
+                      fieldRef:
+                        fieldPath: status.podIP
+                  # Cache downloaded model to local disk
+                  - name: HF_HOME
+                    value: /data01/hf-cache
+                  - name: HUGGINGFACE_HUB_CACHE
+                    value: /data01/hf-cache
+                  # Networking
+                  - name: GLOO_SOCKET_IFNAME
+                    value: eth0
+                  - name: NCCL_SOCKET_IFNAME
+                    value: eth0
+                  - name: NCCL_IB_DISABLE
+                    value: "0"
+                  - name: NCCL_IB_GID_INDEX
+                    value: "7"
+                  - name: NCCL_DEBUG
+                    value: "WARN"
+                  - name: UCX_TLS
+                    value: ^gga
+                  # MI300X ROCm
+                  - name: PYTORCH_ROCM_ARCH
+                    value: "gfx942"
+                  - name: HSA_NO_SCRATCH_RECLAIM
+                    value: "1"
+                  - name: GPU_FORCE_BLIT_COPY_SIZE
+                    value: "6"
+                  - name: HIP_FORCE_DEV_KERNARG
+                    value: "1"
+                  - name: TORCH_BLAS_PREFER_HIPBLASLT
+                    value: "1"
+                ports:
+                  - containerPort: 6379
+                    name: gcs-server
+                  - containerPort: 8265
+                    name: dashboard
+                  - containerPort: 10001
+                    name: client
+                  - containerPort: 30000
+                    name: prefill
+                resources:
+                  limits:
+                    cpu: "4"
+                    amd.com/gpu: 1
+                  requests:
+                    cpu: "4"
+                    amd.com/gpu: 1
+                volumeMounts:
+                  - name: model-cache
+                    mountPath: /data01/hf-cache
+                  - name: shared-mem
+                    mountPath: /dev/shm
+                  - name: dev-kfd
+                    mountPath: /dev/kfd
+                  - name: dev-dri
+                    mountPath: /dev/dri
+
+            volumes:
+              - name: model-cache
+                hostPath:
+                  path: /data01/hf-cache
+                  type: DirectoryOrCreate
+              - name: shared-mem
+                emptyDir:
+                  medium: Memory
+                  sizeLimit: 32Gi
+              - name: dev-kfd
+                hostPath:
+                  path: /dev/kfd
+              - name: dev-dri
+                hostPath:
+                  path: /dev/dri
+
+      workerGroupSpecs:
+        # ── eight-node → prefill rank 1 ───────────────────────────
+        - groupName: prefill-worker
+          replicas: 1
+          minReplicas: 1
+          maxReplicas: 1
+          rayStartParams:
+            num-cpus: "4"
+            num-gpus: "1"
+          template:
+            spec:
+              nodeSelector:
+                kubernetes.io/hostname: eight-node
+              containers:
+                - name: prefill-worker
+                  image: lmsysorg/sglang:v0.5.8-rocm700-mi30x
+                  command: ["/bin/bash", "-lc", "--"]
+                  args:
+                    - >
+                      ulimit -n 65536 &&
+                      sleep 10 &&
+                      eval "$KUBERAY_GEN_RAY_START_CMD --node-ip-address=$MY_POD_IP" &&
+
+                      python3 -m sglang.launch_server \
+                        --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-70B \
+                        --served-model-name deepseek-r1-70b \
+                        --host 0.0.0.0 \
+                        --port 30000 \
+                        --disaggregation-mode prefill \
+                        --disaggregation-transfer-backend mooncake \
+                        --tp-size 2 \
+                        --nnodes 2 \
+                        --node-rank 1 \
+                        --dist-init-addr deepseek-r1-70b-pd-tp-head-svc:5000 \
+                        --trust-remote-code \
+                        --mem-fraction-static 0.8 \
+                        --log-level info
+                  env:
+                    - name: MY_POD_IP
+                      valueFrom:
+                        fieldRef:
+                          fieldPath: status.podIP
+                    - name: HF_HOME
+                      value: /data01/hf-cache
+                    - name: HUGGINGFACE_HUB_CACHE
+                      value: /data01/hf-cache
+                    - name: GLOO_SOCKET_IFNAME
+                      value: eth0
+                    - name: NCCL_SOCKET_IFNAME
+                      value: eth0
+                    - name: NCCL_IB_DISABLE
+                      value: "0"
+                    - name: NCCL_IB_GID_INDEX
+                      value: "7"
+                    - name: NCCL_DEBUG
+                      value: "WARN"
+                    - name: UCX_TLS
+                      value: ^gga
+                    - name: PYTORCH_ROCM_ARCH
+                      value: "gfx942"
+                    - name: HSA_NO_SCRATCH_RECLAIM
+                      value: "1"
+                    - name: GPU_FORCE_BLIT_COPY_SIZE
+                      value: "6"
+                    - name: HIP_FORCE_DEV_KERNARG
+                      value: "1"
+                    - name: TORCH_BLAS_PREFER_HIPBLASLT
+                      value: "1"
+                  lifecycle:
+                    preStop:
+                      exec:
+                        command: ["/bin/sh", "-c", "ray stop"]
+                  resources:
+                    limits:
+                      cpu: "4"
+                      amd.com/gpu: 1
+                    requests:
+                      cpu: "4"
+                      amd.com/gpu: 1
+                  volumeMounts:
+                    - name: model-cache
+                      mountPath: /data01/hf-cache
+                    - name: shared-mem
+                      mountPath: /dev/shm
+                    - name: dev-kfd
+                      mountPath: /dev/kfd
+                    - name: dev-dri
+                      mountPath: /dev/dri
+              volumes:
+                - name: model-cache
+                  hostPath:
+                    path: /data01/hf-cache
+                    type: DirectoryOrCreate
+                - name: shared-mem
+                  emptyDir:
+                    medium: Memory
+                    sizeLimit: 32Gi
+                - name: dev-kfd
+                  hostPath:
+                    path: /dev/kfd
+                - name: dev-dri
+                  hostPath:
+                    path: /dev/dri
+
+        # ── thirthteen-node → decode rank 0 ───────────────────────
+        - groupName: decode-worker-0
+          replicas: 1
+          minReplicas: 1
+          maxReplicas: 1
+          rayStartParams:
+            num-cpus: "4"
+            num-gpus: "1"
+          template:
+            metadata:
+              labels:
+                ray-worker-group: decode-worker-0
+            spec:
+              nodeSelector:
+                kubernetes.io/hostname: thirthteen-node
+              containers:
+                - name: decode-worker-0
+                  image: lmsysorg/sglang:v0.5.8-rocm700-mi30x
+                  command: ["/bin/bash", "-lc", "--"]
+                  args:
+                    - >
+                      ulimit -n 65536 &&
+                      sleep 10 &&
+                      eval "$KUBERAY_GEN_RAY_START_CMD --node-ip-address=$MY_POD_IP" &&
+
+                      python3 -m sglang.launch_server \
+                        --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-70B \
+                        --served-model-name deepseek-r1-70b \
+                        --host 0.0.0.0 \
+                        --port 30001 \
+                        --disaggregation-mode decode \
+                        --disaggregation-transfer-backend mooncake \
+                        --tp-size 2 \
+                        --nnodes 2 \
+                        --node-rank 0 \
+                        --dist-init-addr $MY_POD_IP:5001 \
+                        --trust-remote-code \
+                        --mem-fraction-static 0.8 \
+                        --log-level info
+                  env:
+                    - name: MY_POD_IP
+                      valueFrom:
+                        fieldRef:
+                          fieldPath: status.podIP
+                    - name: HF_HOME
+                      value: /data01/hf-cache
+                    - name: HUGGINGFACE_HUB_CACHE
+                      value: /data01/hf-cache
+                    - name: GLOO_SOCKET_IFNAME
+                      value: eth0
+                    - name: NCCL_SOCKET_IFNAME
+                      value: eth0
+                    - name: NCCL_IB_DISABLE
+                      value: "0"
+                    - name: NCCL_IB_GID_INDEX
+                      value: "7"
+                    - name: NCCL_DEBUG
+                      value: "WARN"
+                    - name: UCX_TLS
+                      value: ^gga
+                    - name: PYTORCH_ROCM_ARCH
+                      value: "gfx942"
+                    - name: HSA_NO_SCRATCH_RECLAIM
+                      value: "1"
+                    - name: GPU_FORCE_BLIT_COPY_SIZE
+                      value: "6"
+                    - name: HIP_FORCE_DEV_KERNARG
+                      value: "1"
+                    - name: TORCH_BLAS_PREFER_HIPBLASLT
+                      value: "1"
+                  lifecycle:
+                    preStop:
+                      exec:
+                        command: ["/bin/sh", "-c", "ray stop"]
+                  resources:
+                    limits:
+                      cpu: "4"
+                      amd.com/gpu: 1
+                    requests:
+                      cpu: "4"
+                      amd.com/gpu: 1
+                  volumeMounts:
+                    - name: model-cache
+                      mountPath: /data01/hf-cache
+                    - name: shared-mem
+                      mountPath: /dev/shm
+                    - name: dev-kfd
+                      mountPath: /dev/kfd
+                    - name: dev-dri
+                      mountPath: /dev/dri
+              volumes:
+                - name: model-cache
+                  hostPath:
+                    path: /data01/hf-cache
+                    type: DirectoryOrCreate
+                - name: shared-mem
+                  emptyDir:
+                    medium: Memory
+                    sizeLimit: 32Gi
+                - name: dev-kfd
+                  hostPath:
+                    path: /dev/kfd
+                - name: dev-dri
+                  hostPath:
+                    path: /dev/dri
+
+        # ── fourthteen-node → decode rank 1 ───────────────────────
+        - groupName: decode-worker-1
+          replicas: 1
+          minReplicas: 1
+          maxReplicas: 1
+          rayStartParams:
+            num-cpus: "4"
+            num-gpus: "1"
+          template:
+            spec:
+              nodeSelector:
+                kubernetes.io/hostname: fourthteen-node
+              containers:
+                - name: decode-worker-1
+                  image: lmsysorg/sglang:v0.5.8-rocm700-mi30x
+                  command: ["/bin/bash", "-lc", "--"]
+                  args:
+                    - >
+                      ulimit -n 65536 &&
+                      sleep 15 &&
+                      eval "$KUBERAY_GEN_RAY_START_CMD --node-ip-address=$MY_POD_IP" &&
+
+                      echo "[INFO] Waiting for decode-worker-0 DNS..." &&
+                      until nslookup deepseek-decode-headless.default.svc.cluster.local > /dev/null 2>&1; do
+                        sleep 3;
+                      done &&
+                      echo "[OK] decode-worker-0 reachable via DNS" &&
+
+                      python3 -m sglang.launch_server \
+                        --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-70B \
+                        --served-model-name deepseek-r1-70b \
+                        --host 0.0.0.0 \
+                        --port 30001 \
+                        --disaggregation-mode decode \
+                        --disaggregation-transfer-backend mooncake \
+                        --tp-size 2 \
+                        --nnodes 2 \
+                        --node-rank 1 \
+                        --dist-init-addr deepseek-decode-headless.default.svc.cluster.local:5001 \
+                        --trust-remote-code \
+                        --mem-fraction-static 0.8 \
+                        --log-level info
+                  env:
+                    - name: MY_POD_IP
+                      valueFrom:
+                        fieldRef:
+                          fieldPath: status.podIP
+                    - name: HF_HOME
+                      value: /data01/hf-cache
+                    - name: HUGGINGFACE_HUB_CACHE
+                      value: /data01/hf-cache
+                    - name: GLOO_SOCKET_IFNAME
+                      value: eth0
+                    - name: NCCL_SOCKET_IFNAME
+                      value: eth0
+                    - name: NCCL_IB_DISABLE
+                      value: "0"
+                    - name: NCCL_IB_GID_INDEX
+                      value: "7"
+                    - name: NCCL_DEBUG
+                      value: "WARN"
+                    - name: UCX_TLS
+                      value: ^gga
+                    - name: PYTORCH_ROCM_ARCH
+                      value: "gfx942"
+                    - name: HSA_NO_SCRATCH_RECLAIM
+                      value: "1"
+                    - name: GPU_FORCE_BLIT_COPY_SIZE
+                      value: "6"
+                    - name: HIP_FORCE_DEV_KERNARG
+                      value: "1"
+                    - name: TORCH_BLAS_PREFER_HIPBLASLT
+                      value: "1"
+                  lifecycle:
+                    preStop:
+                      exec:
+                        command: ["/bin/sh", "-c", "ray stop"]
+                  resources:
+                    limits:
+                      cpu: "4"
+                      amd.com/gpu: 1
+                    requests:
+                      cpu: "4"
+                      amd.com/gpu: 1
+                  volumeMounts:
+                    - name: model-cache
+                      mountPath: /data01/hf-cache
+                    - name: shared-mem
+                      mountPath: /dev/shm
+                    - name: dev-kfd
+                      mountPath: /dev/kfd
+                    - name: dev-dri
+                      mountPath: /dev/dri
+              volumes:
+                - name: model-cache
+                  hostPath:
+                    path: /data01/hf-cache
+                    type: DirectoryOrCreate
+                - name: shared-mem
+                  emptyDir:
+                    medium: Memory
+                    sizeLimit: 32Gi
+                - name: dev-kfd
+                  hostPath:
+                    path: /dev/kfd
+                - name: dev-dri
+                  hostPath:
+                    path: /dev/dri
+
+---
+# External service — points at the standalone router pod
+apiVersion: v1
+kind: Service
+metadata:
+  name: deepseek-r1-70b
+  namespace: default
+  labels:
+    model.aibrix.ai/name: deepseek-r1-70b
+    prometheus-discovery: "true"
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "8080"
+spec:
+  selector:
+    app: deepseek-pd-router
+  ports:
+    - name: serve
+      port: 8000
+      targetPort: 8000
+
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: deepseek-r1-70b-route
+  namespace: aibrix-system
+spec:
+  parentRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: aibrix-eg
+      namespace: aibrix-system
+  rules:
+    - backendRefs:
+        - group: ""
+          kind: Service
+          name: deepseek-r1-70b
+          namespace: default
+          port: 8000
+          weight: 1
+      matches:
+        - headers:
+            - name: model
+              type: Exact
+              value: deepseek-r1-70b
+          path:
+            type: PathPrefix
+            value: /v1/chat/completions
+        - headers:
+            - name: model
+              type: Exact
+              value: deepseek-r1-70b
+          path:
+            type: PathPrefix
+            value: /v1/completions
+      timeouts:
+        request: 300s

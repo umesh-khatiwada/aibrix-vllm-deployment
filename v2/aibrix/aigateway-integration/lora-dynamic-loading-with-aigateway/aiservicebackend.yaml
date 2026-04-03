@@ -1,0 +1,111 @@
+apiVersion: aigateway.envoyproxy.io/v1alpha1
+kind: AIServiceBackend
+metadata:
+  name: qwen-coder-1-5b-instruct
+  namespace: aibrix-system
+spec:
+  schema:
+    name: OpenAI
+    version: v1
+    prefix: /v1
+  backendRef:
+    name: qwen-coder-1-5b-instruct-backend
+    namespace: aibrix-system
+    kind: Backend
+    group: gateway.envoyproxy.io
+---
+apiVersion: aigateway.envoyproxy.io/v1alpha1
+kind: AIServiceBackend
+metadata:
+  name: qwen-code-lora
+  namespace: aibrix-system
+spec:
+  schema:
+    name: OpenAI
+    version: v1
+    prefix: /v1
+  backendRef:
+    name: qwen-code-lora
+    namespace: aibrix-system
+    kind: Backend
+    group: gateway.envoyproxy.io
+---
+apiVersion: aigateway.envoyproxy.io/v1alpha1
+kind: AIServiceBackend
+metadata:
+  name: qwen-code-educational
+  namespace: aibrix-system
+spec:
+  schema:
+    name: OpenAI
+    version: v1
+    prefix: /v1
+  backendRef:
+    name: qwen-code-educational
+    namespace: aibrix-system
+    kind: Backend
+    group: gateway.envoyproxy.io
+---
+apiVersion: aigateway.envoyproxy.io/v1alpha1
+kind: AIServiceBackend
+metadata:
+  name: qwen-code-flutter-dev-lora
+  namespace: aibrix-system
+spec:
+  schema:
+    name: OpenAI
+    version: v1
+    prefix: /v1
+  backendRef:
+    name: qwen-code-flutter-dev-lora
+    namespace: aibrix-system
+    kind: Backend
+    group: gateway.envoyproxy.io
+---
+apiVersion: aigateway.envoyproxy.io/v1alpha1
+kind: AIServiceBackend
+metadata:
+  name: qwen-code-n8n-workflow-generator-lora
+  namespace: aibrix-system
+spec:
+  schema:
+    name: OpenAI
+    version: v1
+    prefix: /v1
+  backendRef:
+    name: qwen-code-n8n-workflow-generator-lora
+    namespace: aibrix-system
+    kind: Backend
+    group: gateway.envoyproxy.io
+---
+apiVersion: aigateway.envoyproxy.io/v1alpha1
+kind: AIServiceBackend
+metadata:
+  name: qwen-code-sql-lora
+  namespace: aibrix-system
+spec:
+  schema:
+    name: OpenAI
+    version: v1
+    prefix: /v1
+  backendRef:
+    name: qwen-code-sql-lora
+    namespace: aibrix-system
+    kind: Backend
+    group: gateway.envoyproxy.io
+---
+apiVersion: aigateway.envoyproxy.io/v1alpha1
+kind: AIServiceBackend
+metadata:
+  name: yugdave-finetuned-query-response
+  namespace: aibrix-system
+spec:
+  schema:
+    name: OpenAI
+    version: v1
+    prefix: /v1
+  backendRef:
+    name: yugdave-finetuned-query-response
+    namespace: aibrix-system
+    kind: Backend
+    group: gateway.envoyproxy.io

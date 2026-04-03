@@ -1,0 +1,503 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AIBrix StormService — PD Disaggregation</title>
+  <style>
+    /* Fullscreen base */
+    *{box-sizing:border-box;margin:0;padding:0}
+    :root{
+      --color-bg-primary: #0b0c10;
+      --color-bg-secondary: #12151e;
+      --color-bg-tertiary: #1b1f2e;
+      --color-bg-info: #0e4f5e;
+      --color-bg-success: #1a3c34;
+      --color-bg-warning: #3b2f2f;
+      --color-bg-danger: #3b1f23;
+      
+      --color-text-primary: #f8fafc;
+      --color-text-secondary: #cbd5e1;
+      --color-text-tertiary: #8b9cba;
+      --color-text-info: #45f3ff;
+      --color-text-success: #00ffaa;
+      --color-text-warning: #ffcc00;
+      --color-text-danger: #ff4d4d;
+      
+      --color-border-primary: #334155;
+      --color-border-secondary: #2a3143;
+      --color-border-tertiary: #4a5568;
+      
+      --border-radius-sm: 0.375rem;
+      --border-radius-md: 0.5rem;
+      --border-radius-lg: 0.75rem;
+      
+      --font-sans: -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Oxygen,Ubuntu,Cantarell,"Open Sans","Helvetica Neue",sans-serif;
+      --font-mono: "SF Mono","Monaco","Inconsolata","Fira Code","Cascadia Code","Roboto Mono",Consolas,monospace;
+    }
+    
+    body{font-family:var(--font-sans);background:var(--color-bg-primary);color:var(--color-text-primary);line-height:1.6;overflow-x:hidden}
+    
+    /* Background animated grid */
+    .bg-grid {
+      position: absolute; top: 0; left: 0; width: 100vw; height: 100vh; z-index: 0;
+      background-size: 40px 40px;
+      background-image: linear-gradient(to right, rgba(255, 255, 255, 0.02) 1px, transparent 1px),
+                        linear-gradient(to bottom, rgba(255, 255, 255, 0.02) 1px, transparent 1px);
+      animation: panGrid 20s linear infinite;
+    }
+    @keyframes panGrid { 0% { background-position: 0 0; } 100% { background-position: 40px 40px; } }
+
+    /* Fullscreen container */
+    .shell{position:fixed;top:0;left:0;width:100vw;height:100vh;background:radial-gradient(circle at top right, var(--color-bg-secondary), var(--color-bg-primary));overflow:hidden;display:flex;flex-direction:column; z-index: 1;}
+    .content{flex:1;overflow:hidden;display:flex;flex-direction:column; position:relative; z-index: 2;}
+    
+    /* Top header */
+    .top{padding:1.5rem 2.5rem 1rem;background:rgba(18, 21, 30, 0.8);backdrop-filter:blur(12px);border-bottom:1px solid var(--color-border-secondary);display:flex;align-items:flex-start;justify-content:space-between;gap:1.5rem;flex-wrap:wrap; position: relative; z-index: 10;}
+    .top-title{font-size:1.5rem;font-weight:800;background:linear-gradient(135deg,#ffffff,#a3b1c6);background-clip:text;-webkit-background-clip:text;-webkit-text-fill-color:transparent;line-height:1.2;letter-spacing:-0.5px;}
+    .top-sub{font-size:0.9rem;color:var(--color-text-tertiary);margin-top:0.35rem; font-weight: 500;}
+    
+    /* Badges with glow */
+    .badges{display:flex;gap:0.75rem;flex-wrap:wrap}
+    .badge{display:inline-flex;align-items:center;font-size:0.75rem;font-weight:700;padding:0.4rem 1rem;border-radius:9999px;gap:0.35rem;backdrop-filter:blur(10px);border:1px solid rgba(255,255,255,0.1); transition: transform 0.3s ease, box-shadow 0.3s ease;}
+    .badge:hover { transform: translateY(-2px); }
+    .b-amd{background:linear-gradient(135deg,rgba(26,15,46,0.8),rgba(42,26,78,0.8));color:#d4b3ff;border-color:#6e56cf;box-shadow:0 0 15px rgba(110,86,207,0.4)}
+    .b-blue{background:linear-gradient(135deg,rgba(14,79,94,0.8),rgba(10,90,138,0.8));color:var(--color-text-info);border-color:#1e88e5;box-shadow:0 0 15px rgba(30,136,229,0.3)}
+    .b-green{background:linear-gradient(135deg,rgba(26,60,52,0.8),rgba(15,81,50,0.8));color:var(--color-text-success);border-color:#2e7d32;box-shadow:0 0 15px rgba(46,125,50,0.3)}
+    .b-gray{background:linear-gradient(135deg,rgba(255,255,255,0.05),rgba(255,255,255,0.08));color:var(--color-text-secondary);border-color:var(--color-border-secondary)}
+    
+    /* Autoplay Controls & Progress */
+    .controls { display:flex; align-items:center; gap: 1rem; margin-top:0.5rem;}
+    .play-btn { background: var(--color-text-info); color: var(--color-bg-primary); border:none; border-radius: 20px; padding: 0.4rem 1rem; font-size: 0.8rem; font-weight: 700; cursor: pointer; display:flex; align-items:center; gap: 0.4rem; transition:all 0.2s; box-shadow: 0 0 10px rgba(69,243,255,0.4);}
+    .play-btn:hover { transform: scale(1.05); box-shadow: 0 0 20px rgba(69,243,255,0.6); }
+    .progress-bar-container { height: 3px; background: rgba(255,255,255,0.1); width: 100%; position: relative; }
+    .progress-bar { height: 100%; width: 0%; background: var(--color-text-info); transition: width 0.1s linear; box-shadow: 0 0 10px var(--color-text-info); }
+
+    /* Tabs */
+    .tabs{padding:0 2.5rem;background:rgba(18, 21, 30, 0.6);display:flex;gap:0;overflow-x:auto;scrollbar-width:none;-ms-overflow-style:none; position:relative; z-index:9;}
+    .tabs::-webkit-scrollbar{display:none}
+    .tab{flex:1 0 auto;font-size:0.875rem;font-weight:600;padding:1.25rem 1.5rem;border:none;background:none;color:var(--color-text-tertiary);cursor:pointer;position:relative;white-space:nowrap;transition:all 0.3s ease; border-bottom: 2px solid transparent; text-transform: uppercase; letter-spacing: 0.05em;}
+    .tab:hover{color:var(--color-text-primary);background:rgba(255,255,255,0.03)}
+    .tab.active{color:var(--color-text-info);background:linear-gradient(180deg,rgba(69,243,255,0.05),transparent);border-bottom-color:var(--color-text-info); text-shadow: 0 0 10px rgba(69,243,255,0.5);}
+    
+    /* Panels with Staggered Entrance */
+    .panel{display:none;padding:2.5rem;flex:1;overflow-y:auto;}
+    .panel.active{display:block;}
+    
+    @keyframes slideUpFade { from { opacity: 0; transform: translateY(20px); filter:blur(4px); } to { opacity: 1; transform: translateY(0); filter:blur(0); } }
+    .panel.active .narr { animation: slideUpFade 0.6s cubic-bezier(0.16, 1, 0.3, 1) forwards 0.1s; opacity: 0; }
+    .panel.active .section-lbl { animation: slideUpFade 0.6s cubic-bezier(0.16, 1, 0.3, 1) forwards 0.2s; opacity: 0; }
+    .panel.active .flow { animation: slideUpFade 0.6s cubic-bezier(0.16, 1, 0.3, 1) forwards 0.3s; opacity: 0; }
+    .panel.active .roles { animation: slideUpFade 0.6s cubic-bezier(0.16, 1, 0.3, 1) forwards 0.4s; opacity: 0; }
+    .panel.active .manifest-wrap { animation: slideUpFade 0.6s cubic-bezier(0.16, 1, 0.3, 1) forwards 0.3s; opacity: 0; }
+    .panel.active .kv { animation: slideUpFade 0.6s cubic-bezier(0.16, 1, 0.3, 1) forwards 0.4s; opacity: 0; }
+
+    /* Role cards */
+    .roles{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:1.5rem;margin-bottom:2rem}
+    .role-card{background:rgba(27, 31, 46, 0.7);border:1px solid var(--color-border-secondary);border-radius:var(--border-radius-lg);overflow:hidden;backdrop-filter:blur(20px);transition:all 0.4s cubic-bezier(0.16, 1, 0.3, 1);box-shadow:0 8px 32px rgba(0,0,0,0.3); position: relative;}
+    .role-card::before { content: ''; position: absolute; top: 0; left: 0; width: 100%; height: 2px; background: transparent; transition: background 0.4s; }
+    .role-card:hover{transform:translateY(-8px);box-shadow:0 20px 40px rgba(0,0,0,0.6); border-color: rgba(255,255,255,0.2);}
+    .role-card:hover::before { background: var(--color-text-info); }
+    .role-head{padding:1.25rem 1.5rem;font-size:0.9rem;font-weight:700;display:flex;align-items:center;gap:0.75rem; border-bottom: 1px solid rgba(255,255,255,0.05);}
+    .role-body{padding:1.5rem}
+    
+    /* Manifest viewer */
+    .manifest-wrap{background:rgba(18, 21, 30, 0.8);border:1px solid var(--color-border-secondary);border-radius:var(--border-radius-lg);overflow:hidden;margin-bottom:1.5rem;box-shadow:0 10px 30px rgba(0,0,0,0.4); position:relative;}
+    .manifest-head{display:flex;align-items:center;justify-content:space-between;padding:1rem 1.5rem;background:linear-gradient(90deg,var(--color-bg-tertiary),var(--color-bg-secondary));border-bottom:1px solid var(--color-border-secondary)}
+    .manifest-title{font-size:0.875rem;font-weight:700;color:var(--color-text-info); display:flex; align-items:center; gap:0.5rem;}
+    .manifest-title::before { content: '📄'; }
+    .manifest-body{font-family:var(--font-mono);font-size:0.8rem;line-height:1.7;padding:1.5rem;overflow-x:auto;max-height:450px;overflow-y:auto;}
+    
+    /* Code syntax highlighting simulation */
+    .y-key{color:#9cdcfe} .y-val{color:#b5cea8} .y-str{color:#ce9178} .y-comment{color:#6a9955; font-style:italic;} .y-kind{color:#4ec9b0}
+
+    /* Narration block */
+    .narr{background:linear-gradient(135deg,rgba(14,79,94,0.2),rgba(14,79,94,0.05));border-left:4px solid var(--color-text-info);border-radius:0 var(--border-radius-md) var(--border-radius-md) 0;padding:1.5rem;margin-bottom:2rem;backdrop-filter:blur(10px); position:relative; overflow:hidden;}
+    .narr::after { content: ''; position: absolute; top: -50%; left: -50%; width: 200%; height: 200%; background: radial-gradient(circle, rgba(69,243,255,0.05) 0%, transparent 70%); animation: rotateGlow 10s linear infinite; pointer-events:none; }
+    @keyframes rotateGlow { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+    .narr-lbl{font-size:0.75rem;font-weight:800;letter-spacing:0.15em;text-transform:uppercase;color:var(--color-text-info);margin-bottom:0.75rem; display:flex; align-items:center; gap:0.5rem;}
+    .narr-lbl::before { content: '●'; animation: blink 2s infinite; }
+    @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+    .narr p{font-size:1rem;color:var(--color-text-primary);line-height:1.8;margin:0; text-shadow: 0 2px 4px rgba(0,0,0,0.5);}
+    
+    /* Data Flow Animations (The "Video" feel) */
+    .flow{display:flex;align-items:center;gap:0;margin:2.5rem 0;flex-wrap:nowrap;overflow-x:auto;padding-bottom:1rem}
+    .flow-node{flex-shrink:0;border-radius:var(--border-radius-lg);padding:1.25rem;font-size:0.9rem;font-weight:700;text-align:center;min-width:150px;box-shadow:0 8px 25px rgba(0,0,0,0.4);position:relative; border: 1px solid rgba(255,255,255,0.1); z-index:2; background: var(--color-bg-secondary);}
+    
+    .node-pulse { animation: nodeGlow 3s infinite alternate; }
+    @keyframes nodeGlow { 0% { box-shadow: 0 0 10px rgba(69,243,255,0.1); border-color: rgba(69,243,255,0.2); } 100% { box-shadow: 0 0 30px rgba(69,243,255,0.4); border-color: rgba(69,243,255,0.6); } }
+
+    .flow-arrow{flex-shrink:0;font-size:1.5rem;color:var(--color-text-tertiary);padding:0 1.5rem;font-weight:300; position:relative; display:flex; flex-direction:column; align-items:center;}
+    
+    /* Animated Data Particles */
+    .flow-arrow::before {
+      content: '→';
+      background: linear-gradient(90deg, transparent, var(--color-text-info), transparent);
+      background-clip: text;
+      -webkit-background-clip: text;
+      color: rgba(255,255,255,0.1);
+      animation: dataStream 1.5s infinite linear;
+    }
+    @keyframes dataStream { 0% { background-position: -20px 0; opacity:0;} 50% {opacity:1;} 100% { background-position: 20px 0; opacity:0;} }
+
+    .flow-label{font-size:0.75rem;color:var(--color-text-secondary);text-align:center;margin-top:0.75rem; font-family:var(--font-mono); letter-spacing:0.05em; background:rgba(0,0,0,0.3); padding:4px 8px; border-radius:4px;}
+    
+    /* Tables */
+    .kv{width:100%;font-size:0.85rem;border-collapse:collapse;margin:1rem 0;background:rgba(27, 31, 46, 0.5);border-radius:var(--border-radius-md);overflow:hidden;box-shadow:0 4px 20px rgba(0,0,0,0.2); border: 1px solid var(--color-border-secondary);}
+    .kv td{padding:1.25rem;border-bottom:1px solid var(--color-border-secondary);vertical-align:top}
+    .kv td:first-child{color:var(--color-text-info);width:35%;font-family:var(--font-mono);font-weight:600}
+    .kv td:last-child{color:var(--color-text-secondary)}
+    .kv tr:last-child td{border-bottom:none}
+    .kv tr:hover td{background:rgba(255,255,255,0.03); color: white;}
+    
+    /* Utilities */
+    .section-lbl{font-size:0.8rem;font-weight:800;letter-spacing:0.15em;text-transform:uppercase;color:var(--color-text-secondary);margin:2.5rem 0 1.5rem 0;display:flex;align-items:center;gap:0.75rem;}
+    .section-lbl::after { content:''; flex:1; height:1px; background: linear-gradient(90deg, var(--color-border-tertiary), transparent); }
+    .tip{background:linear-gradient(135deg,rgba(69,243,255,0.05),rgba(69,243,255,0.01));border-left:3px solid var(--color-text-info);border-radius:2px var(--border-radius-md) var(--border-radius-md) 2px;padding:1rem;margin-top:1.5rem; font-size: 0.85rem;}
+    
+    /* Floating Action Buttons */
+    .action-btns { position:fixed; bottom:2rem; right:2rem; z-index:1000; display:flex; gap:1rem; }
+    .fab-btn{background:rgba(18, 21, 30, 0.9);backdrop-filter:blur(10px);border:1px solid rgba(255,255,255,0.2);border-radius:50%;width:3.5rem;height:3.5rem;display:flex;align-items:center;justify-content:center;cursor:pointer;transition:all 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);font-size:1.25rem;color:var(--color-text-primary); box-shadow: 0 10px 25px rgba(0,0,0,0.5);}
+    .fab-btn:hover{background:var(--color-text-info);color:var(--color-bg-primary);transform:scale(1.1) translateY(-5px); border-color:transparent; box-shadow: 0 15px 35px rgba(69,243,255,0.4);}
+
+    @media (max-width:768px){
+      .top{padding:1.5rem;flex-direction:column;align-items:flex-start;text-align:left}
+      .tabs{padding:0 1rem}
+      .panel{padding:1.5rem}
+      .flow{flex-direction:column;gap:1.5rem;align-items:stretch}
+      .flow-node{min-width:auto}
+      .flow-arrow{transform: rotate(90deg); padding: 1rem 0;}
+    }
+  </style>
+</head>
+<body>
+  
+  <div class="bg-grid"></div>
+
+  <div class="shell" id="presentation-shell">
+    
+    <div class="progress-bar-container">
+      <div class="progress-bar" id="progress-bar"></div>
+    </div>
+
+    <div class="content">
+      <div class="top">
+        <div>
+          <div class="top-title">AIBrix StormService — PD Disaggregation</div>
+          <div class="top-sub">Multi-node inference on AMD MI300X • SGLang v0.5.8 + Mooncake KV transfer</div>
+        </div>
+        <div>
+          <div class="badges">
+            <span class="badge b-amd">AMD MI300X</span>
+            <span class="badge b-blue">SGLang v0.5.8</span>
+            <span class="badge b-green">Mooncake KV</span>
+            <span class="badge b-gray">TP=2 Decode</span>
+          </div>
+          <div class="controls">
+            <button class="play-btn" id="playToggle" onclick="togglePlay()">
+              ▶ Start Presentation
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div class="tabs" role="tablist">
+        <button class="tab active" role="tab" aria-selected="true" data-tab="overview">1. Overview</button>
+        <button class="tab" role="tab" aria-selected="false" data-tab="router">2. Router</button>
+        <button class="tab" role="tab" aria-selected="false" data-tab="prefill">3. Prefill</button>
+        <button class="tab" role="tab" aria-selected="false" data-tab="decode">4. Decode (TP=2)</button>
+        <button class="tab" role="tab" aria-selected="false" data-tab="manifest">5. Full Manifest</button>
+      </div>
+
+      <div class="panel active" id="tab-overview" role="tabpanel">
+        <div class="narr">
+          <div class="narr-lbl">Architecture Overview</div>
+          <p>This StormService implements prefill-decode disaggregation across AMD MI300X GPUs. The pipeline splits into three specialized roles: Router orchestrates traffic, Prefill processes prompts and builds KV cache, and Decode (TP=2 across 2 nodes) generates tokens. Mooncake enables high-speed KV cache transfer between phases, eliminating GPU contention.</p>
+        </div>
+
+        <div class="section-lbl">📊 Live Request Flow</div>
+        <div class="flow">
+          <div class="flow-node node-pulse" style="border-color:var(--color-border-secondary)">Client Request</div>
+          <div class="flow-arrow"></div>
+          <div class="flow-node" style="border-color:var(--color-text-info)">Router<br><small style="color:var(--color-text-info)">sglang-router</small></div>
+          <div class="flow-arrow"><div class="flow-label">policy: random</div></div>
+          <div class="flow-node" style="border-color:var(--color-text-warning)">Prefill Node<br><small style="color:var(--color-text-warning)">TP=1 • 1 GPU</small></div>
+          <div class="flow-arrow"><div class="flow-label">KV Transfer</div></div>
+          <div class="flow-node node-pulse" style="border-color:#bc8cff; box-shadow: 0 0 20px rgba(188,140,255,0.2);">Mooncake<br><small style="color:#bc8cff">RDMA/Ethernet</small></div>
+          <div class="flow-arrow"><div class="flow-label">Cache Moved</div></div>
+          <div class="flow-node" style="border-color:var(--color-text-success)">Decode Nodes<br><small style="color:var(--color-text-success)">TP=2 • 2 GPUs</small></div>
+          <div class="flow-arrow"></div>
+          <div class="flow-node node-pulse" style="border-color:var(--color-border-secondary)">Response Tokens</div>
+        </div>
+
+        <div class="section-lbl">🎭 Role Configuration Summary</div>
+        <div class="roles">
+          <div class="role-card">
+            <div class="role-head" style="color:var(--color-text-info)">
+              <span>🚦</span> Router • 1 replica
+            </div>
+            <div class="role-body">
+              <p style="color:var(--color-text-secondary); margin-bottom: 10px;">Runs <code>sglang-router</code> with <code>--pd-disaggregation</code>. Discovers prefill/decode pods via K8s service discovery (port 30000). Uses <code>--policy random</code> routing.</p>
+              <div class="tip"><strong>CPU-only</strong> — No GPU allocation required</div>
+            </div>
+          </div>
+          <div class="role-card">
+            <div class="role-head" style="color:var(--color-text-warning)">
+              <span>⚡</span> Prefill • 1 pod • 1 GPU
+            </div>
+            <div class="role-body">
+              <p style="color:var(--color-text-secondary); margin-bottom: 10px;">SGLang <code>--disaggregation-mode prefill</code> (TP=1). Processes prompts, builds KV cache, transfers via Mooncake.</p>
+              <div class="tip"><strong>Model:</strong> <code>/models/Llama-3.2-1B-Instruct</code></div>
+            </div>
+          </div>
+          <div class="role-card">
+            <div class="role-head" style="color:var(--color-text-success)">
+              <span>🔄</span> Decode • 1 replica • 2 GPUs
+            </div>
+            <div class="role-body">
+              <p style="color:var(--color-text-secondary); margin-bottom: 10px;">TP=2 across 2 nodes (<code>podGroupSize: 2</code>). Gang-scheduled. Rank derived from hostname. NCCL over Ethernet.</p>
+              <div class="tip"><strong>Coordination:</strong> Rank-1 waits for Rank-0</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel" id="tab-router" role="tabpanel">
+        <div class="narr">
+          <div class="narr-lbl">Router Intelligence</div>
+          <p>The router acts as traffic director with live Kubernetes service discovery. It maintains endpoints for prefill (<code>role-name=prefill</code>) and decode (<code>role-name=decode</code>) pods on port 30000. Requests are routed using label selectors with <code>--policy random</code>.</p>
+        </div>
+        <div class="manifest-wrap">
+          <div class="manifest-head">
+            <span class="manifest-title">Router Launch Command</span>
+          </div>
+          <div class="manifest-body"><span class="y-comment"># sglang-router with PD disaggregation enabled</span>
+<span class="y-val">python3</span> -m sglang_router.launch_router \
+  <span class="y-key">--host</span> <span class="y-str">"0.0.0.0"</span> \
+  <span class="y-key">--pd-disaggregation</span> \
+  <span class="y-key">--policy</span> <span class="y-str">"random"</span> \
+  <span class="y-key">--service-discovery</span> \
+  <span class="y-key">--service-discovery-port</span> <span class="y-str">"30000"</span> \
+  <span class="y-key">--worker-startup-timeout-secs</span> <span class="y-str">"900"</span> \
+  <span class="y-key">--prefill-selector</span> \
+    storm-service-name=<span class="y-str">$STORM_SERVICE_NAME</span>,role-name=<span class="y-str">"prefill"</span> \
+  <span class="y-key">--decode-selector</span> \
+    storm-service-name=<span class="y-str">$STORM_SERVICE_NAME</span>,role-name=<span class="y-str">"decode"</span></div>
+        </div>
+        <div class="section-lbl">🔍 K8s Service Discovery Breakdown</div>
+        <table class="kv">
+          <tr><td>prefill-selector</td><td>Matches <code>role-name=prefill</code> + <code>role-replica-index=0</code></td></tr>
+          <tr><td>decode-selector</td><td>Matches <code>role-name=decode</code> + <code>role-replica-index=0</code></td></tr>
+          <tr><td>Discovery Port</td><td>Port <code>30000</code> exposed by both roles</td></tr>
+          <tr><td>Container Image</td><td><code>aibrix/sglang-router:v0.1.7-patch.1</code></td></tr>
+        </table>
+      </div>
+
+      <div class="panel" id="tab-prefill" role="tabpanel">
+        <div class="narr">
+          <div class="narr-lbl">Prefill Processing Layer</div>
+          <p>A single MI300X GPU handles compute-heavy prompt processing in <code>prefill</code> mode. It generates the KV cache and hands it off to the Mooncake backend over RDMA/Ethernet. Explicit ROCm environment flags are injected to guarantee maximum throughput stability.</p>
+        </div>
+        <div class="manifest-wrap">
+          <div class="manifest-head"><span class="manifest-title">Prefill Engine Command</span></div>
+          <div class="manifest-body"><span class="y-val">python3</span> -m sglang.launch_server \
+  <span class="y-key">--model-path</span> <span class="y-str">"/models/Llama-3.2-1B-Instruct"</span> \
+  <span class="y-key">--host</span> <span class="y-str">"0.0.0.0"</span> \
+  <span class="y-key">--port</span> <span class="y-str">"30000"</span> \
+  <span class="y-key">--disaggregation-mode</span> <span class="y-str">"prefill"</span> \
+  <span class="y-key">--disaggregation-transfer-backend</span> <span class="y-str">"mooncake"</span> \
+  <span class="y-key">--dtype</span> <span class="y-str">"bfloat16"</span> \
+  <span class="y-key">--tp-size</span> <span class="y-str">"1"</span> \
+  <span class="y-key">--mem-fraction-static</span> <span class="y-str">"0.8"</span></div>
+        </div>
+        <div class="section-lbl">⚙️ AMD MI300X ROCm Hardware Optimizations</div>
+        <table class="kv">
+          <tr><td><code>HSA_NO_SCRATCH_RECLAIM=1</code></td><td>Prevents ROCm scratch memory reclamation, stabilizing inference latency.</td></tr>
+          <tr><td><code>GPU_FORCE_BLIT_COPY_SIZE=6</code></td><td>Optimizes blit copying for small tensor transfers specifically on MI300X architecture.</td></tr>
+          <tr><td><code>HIP_FORCE_DEV_KERNARG=1</code></td><td>Forces kernel arguments directly into device memory for faster execution.</td></tr>
+        </table>
+      </div>
+
+      <div class="panel" id="tab-decode" role="tabpanel">
+        <div class="narr">
+          <div class="narr-lbl">Distributed Decode Coordination (TP=2)</div>
+          <p>Memory-bandwidth bound token generation is split across two MI300X GPUs on separate nodes. Rank is derived dynamically from the K8s hostname. A zero-dependency bash script ensures Rank-1 waits for the Rank-0 master port (29500) before initializing NCCL over Ethernet.</p>
+        </div>
+        <div class="manifest-wrap">
+          <div class="manifest-head"><span class="manifest-title">Dynamic Rank Derivation & Synchronization Logic</span></div>
+          <div class="manifest-body"><span class="y-comment"># Extract cluster rank from StatefulSet hostname: &lt;name&gt;-decode-&lt;hash&gt;-&lt;RANK&gt;</span>
+NODE_RANK=$(echo $HOSTNAME | awk -F'-' '{print $NF}')
+MASTER_HOSTNAME=$(echo $HOSTNAME | sed 's/-[0-9]*$/-0/')
+MASTER_DNS="${MASTER_HOSTNAME}.${STORM_SERVICE_NAME}.default.svc.cluster.local:29500"
+
+<span class="y-comment"># Rank-1 halts execution and waits for master to open socket</span>
+if [ "$NODE_RANK" != "0" ]; then
+  until timeout 3 bash -c "echo > /dev/tcp/${MASTER_DNS}" 2>/dev/null; do
+    sleep 3
+  done
+fi
+
+<span class="y-comment"># Initialize Distributed SGLang</span>
+<span class="y-val">python3</span> -m sglang.launch_server \
+  <span class="y-key">--disaggregation-mode</span> <span class="y-str">"decode"</span> \
+  <span class="y-key">--tp-size</span> <span class="y-str">"2"</span> \
+  <span class="y-key">--nnodes</span> <span class="y-str">"2"</span> \
+  <span class="y-key">--node-rank</span> <span class="y-str">"${NODE_RANK}"</span></div>
+        </div>
+        <div class="section-lbl">🏎️ Aibrix Gang Scheduling Variables</div>
+        <table class="kv">
+          <tr><td><code>podGroupSize: 2</code></td><td>Ensures Kubernetes schedules both physical nodes atomically (all-or-nothing).</td></tr>
+          <tr><td><code>stateful: true</code></td><td>Guarantees predictable DNS hostnames required for the bash rank derivation logic.</td></tr>
+          <tr><td><code>NCCL_IB_DISABLE=1</code></td><td>Forces standard Ethernet usage by actively disabling InfiniBand protocols.</td></tr>
+        </table>
+      </div>
+
+      <div class="panel" id="tab-manifest" role="tabpanel">
+        <div class="narr">
+          <div class="narr-lbl">The Complete StormService YAML</div>
+          <p>This single custom resource definition (CRD) orchestrates the entire architecture. It provisions the CPU router, the TP=1 prefill node, and the TP=2 gang-scheduled decode cluster simultaneously, handling stateful scaling and volume mounts.</p>
+        </div>
+        <div class="manifest-wrap">
+          <div class="manifest-head">
+            <span class="manifest-title">tp-1p1d-mi300x StormService Definition</span>
+            <span class="badge b-gray" style="font-family: monospace;">orchestration.aibrix.ai/v1alpha1</span>
+          </div>
+          <div class="manifest-body"><span class="y-key">apiVersion</span>: <span class="y-kind">orchestration.aibrix.ai/v1alpha1</span>
+<span class="y-key">kind</span>: <span class="y-kind">StormService</span>
+<span class="y-key">metadata</span>: 
+  <span class="y-key">name</span>: <span class="y-str">"tp-1p1d-mi300x"</span>
+<span class="y-key">spec</span>:
+  <span class="y-key">replicas</span>: <span class="y-val">1</span>
+  <span class="y-key">stateful</span>: <span class="y-val">true</span>
+  <span class="y-key">roles</span>:
+  
+  <span class="y-comment"># Traffic Controller</span>
+  - <span class="y-key">name</span>: <span class="y-str">"routing"</span>
+    <span class="y-key">replicas</span>: <span class="y-val">1</span>
+    
+  <span class="y-comment"># Single GPU Prompt Processing</span>
+  - <span class="y-key">name</span>: <span class="y-str">"prefill"</span>
+    <span class="y-key">replicas</span>: <span class="y-val">1</span>
+    
+  <span class="y-comment"># Multi-Node Token Generation</span>
+  - <span class="y-key">name</span>: <span class="y-str">"decode"</span>
+    <span class="y-key">replicas</span>: <span class="y-val">1</span>
+    <span class="y-key">podGroupSize</span>: <span class="y-val">2</span> <span class="y-comment"># Triggers Volcano/Aibrix Gang Scheduler</span></div>
+        </div>
+      </div>
+    </div>
+    
+    <div class="action-btns">
+      <button class="fab-btn" title="Toggle Fullscreen" onclick="toggleFullscreen()">⛶</button>
+    </div>
+  </div>
+  
+  <script>
+    const tabs = Array.from(document.querySelectorAll('.tab'));
+    const progressBar = document.getElementById('progress-bar');
+    const playBtn = document.getElementById('playToggle');
+    
+    let isPlaying = false;
+    let currentTabIndex = 0;
+    let progressInterval;
+    let slideDuration = 8000; // 8 seconds per slide
+    let currentProgress = 0;
+
+    // Core Navigation Logic
+    function switchTab(index, manual = false) {
+      if (manual && isPlaying) { togglePlay(); } // Stop auto if user clicks
+      
+      currentTabIndex = index;
+      const tabId = tabs[index].dataset.tab;
+
+      // Update Tabs UI
+      tabs.forEach((tab, i) => {
+        const isActive = i === index;
+        tab.classList.toggle('active', isActive);
+        tab.setAttribute('aria-selected', isActive);
+      });
+      
+      // Update Panels UI (re-triggering CSS animations)
+      document.querySelectorAll('.panel').forEach(panel => {
+        panel.classList.remove('active');
+        // Force reflow to restart animations
+        void panel.offsetWidth; 
+        if(panel.id === `tab-${tabId}`) {
+            panel.classList.add('active');
+        }
+      });
+
+      // Reset progress bar if automating
+      if(isPlaying) {
+        currentProgress = 0;
+        progressBar.style.width = '0%';
+      }
+    }
+
+    // Event delegation for clicks
+    document.addEventListener('click', (e) => {
+      if (e.target.matches('[data-tab]')) {
+        const index = tabs.indexOf(e.target);
+        switchTab(index, true);
+      }
+    });
+
+    // Keyboard navigation (Left/Right Arrows)
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'ArrowLeft' && currentTabIndex > 0) {
+        switchTab(currentTabIndex - 1, true);
+      } else if (e.key === 'ArrowRight' && currentTabIndex < tabs.length - 1) {
+        switchTab(currentTabIndex + 1, true);
+      }
+    });
+
+    // Autoplay Engine
+    function togglePlay() {
+      isPlaying = !isPlaying;
+      
+      if (isPlaying) {
+        playBtn.innerHTML = '⏸ Pause Presentation';
+        playBtn.style.background = '#ff4d4d';
+        playBtn.style.color = 'white';
+        playBtn.style.boxShadow = '0 0 15px rgba(255, 77, 77, 0.5)';
+        
+        // Start Progress Loop
+        progressInterval = setInterval(() => {
+          currentProgress += 50; // Add 50ms
+          const percentage = (currentProgress / slideDuration) * 100;
+          progressBar.style.width = `${percentage}%`;
+
+          if (currentProgress >= slideDuration) {
+            // Next Slide
+            currentProgress = 0;
+            currentTabIndex = (currentTabIndex + 1) % tabs.length;
+            switchTab(currentTabIndex);
+          }
+        }, 50);
+
+      } else {
+        playBtn.innerHTML = '▶ Resume Presentation';
+        playBtn.style.background = 'var(--color-text-info)';
+        playBtn.style.color = 'var(--color-bg-primary)';
+        playBtn.style.boxShadow = '0 0 10px rgba(69,243,255,0.4)';
+        
+        clearInterval(progressInterval);
+        progressBar.style.width = '0%';
+        currentProgress = 0;
+      }
+    }
+
+    // Fullscreen toggle wrapper
+    function toggleFullscreen() {
+      const shell = document.getElementById('presentation-shell');
+      if (!document.fullscreenElement) {
+        shell.requestFullscreen().catch(err => {
+          console.error(`Error attempting to enable fullscreen: ${err.message}`);
+        });
+      } else {
+        document.exitFullscreen();
+      }
+    }
+  </script>
+</body>
+</html>

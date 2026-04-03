@@ -1,0 +1,908 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SGLang P/D Disaggregation — AMD MI300X on K8s</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg0: #060910;
+  --bg1: #0c1018;
+  --bg2: #111520;
+  --bg3: #161c28;
+  --border: rgba(255,255,255,0.07);
+  --border-hi: rgba(255,255,255,0.14);
+
+  --cyan:   #00e5ff;
+  --amber:  #ffb300;
+  --green:  #00e676;
+  --purple: #b388ff;
+  --red:    #ff5252;
+  --muted:  #546e8a;
+  --text1:  #e8edf5;
+  --text2:  #8fa3bb;
+  --text3:  #4a617a;
+
+  --mono: 'IBM Plex Mono', monospace;
+  --sans: 'DM Sans', sans-serif;
+  --r-sm: 6px;
+  --r-md: 10px;
+  --r-lg: 16px;
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body {
+  height: 100%;
+  background: var(--bg0);
+  color: var(--text1);
+  font-family: var(--sans);
+  font-size: 14px;
+  line-height: 1.6;
+  overflow: hidden;
+}
+
+.bg {
+  position: fixed; inset: 0; z-index: 0; pointer-events: none;
+  background:
+    radial-gradient(ellipse 60% 40% at 80% 10%, rgba(0,229,255,.04) 0%, transparent 60%),
+    radial-gradient(ellipse 50% 30% at 10% 90%, rgba(0,230,118,.03) 0%, transparent 60%),
+    linear-gradient(180deg, #060910 0%, #080c14 100%);
+}
+.bg-dots {
+  position: fixed; inset: 0; z-index: 0; pointer-events: none;
+  background-image: radial-gradient(rgba(255,255,255,.018) 1px, transparent 1px);
+  background-size: 28px 28px;
+}
+
+.shell {
+  position: relative; z-index: 1;
+  display: grid;
+  grid-template-rows: auto auto 1fr;
+  height: 100vh;
+  overflow: hidden;
+}
+
+/* ── Header ── */
+header {
+  padding: 18px 32px 16px;
+  background: rgba(12,16,24,.85);
+  backdrop-filter: blur(16px);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+.header-left { display: flex; flex-direction: column; gap: 4px; }
+.header-eyebrow {
+  font-family: var(--mono);
+  font-size: 10px; font-weight: 500;
+  letter-spacing: .14em; text-transform: uppercase;
+  color: var(--cyan); opacity: .8;
+}
+.header-title { font-size: 20px; font-weight: 600; color: var(--text1); letter-spacing: -.3px; }
+.header-sub   { font-size: 12px; color: var(--text2); font-weight: 300; }
+.chips { display: flex; gap: 8px; flex-wrap: wrap; }
+.chip {
+  font-family: var(--mono); font-size: 11px; font-weight: 500;
+  padding: 4px 12px; border-radius: 999px; border: 1px solid; letter-spacing: .04em;
+}
+.chip-amd { color: var(--purple); border-color: rgba(179,136,255,.3); background: rgba(179,136,255,.06); }
+.chip-sg  { color: var(--cyan);   border-color: rgba(0,229,255,.3);   background: rgba(0,229,255,.06); }
+.chip-k8  { color: var(--green);  border-color: rgba(0,230,118,.3);   background: rgba(0,230,118,.06); }
+
+/* ── Nav ── */
+nav {
+  display: flex;
+  padding: 0 32px;
+  background: rgba(10,14,22,.7);
+  border-bottom: 1px solid var(--border);
+  gap: 2px; position: relative;
+}
+.tab-btn {
+  font-family: var(--mono); font-size: 11px; font-weight: 500;
+  letter-spacing: .08em; text-transform: uppercase;
+  padding: 14px 20px; background: none; border: none;
+  color: var(--text3); cursor: pointer; position: relative;
+  transition: color .2s; white-space: nowrap;
+}
+.tab-btn::after {
+  content: ''; position: absolute; bottom: -1px; left: 0; right: 0; height: 2px;
+  background: var(--cyan); transform: scaleX(0);
+  transition: transform .25s cubic-bezier(.4,0,.2,1);
+}
+.tab-btn:hover { color: var(--text2); }
+.tab-btn.active { color: var(--cyan); }
+.tab-btn.active::after { transform: scaleX(1); }
+
+.prog-track {
+  position: absolute; bottom: -1px; left: 0; right: 0; height: 2px;
+  background: var(--border); z-index: 0;
+}
+.prog-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--cyan), var(--purple));
+  width: 0%; transition: width .1s linear;
+}
+
+/* ── Panels ── */
+.panels { overflow: hidden; position: relative; }
+.panel {
+  display: none;
+  height: calc(100vh - 118px);
+  overflow-y: auto;
+  padding: 28px 32px 32px;
+  scrollbar-width: thin; scrollbar-color: var(--bg3) transparent;
+}
+.panel::-webkit-scrollbar { width: 4px; }
+.panel::-webkit-scrollbar-thumb { background: var(--bg3); border-radius: 2px; }
+.panel.active { display: block; }
+@keyframes panelIn {
+  from { opacity: 0; transform: translateY(14px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.panel.active { animation: panelIn .35s cubic-bezier(.4,0,.2,1) forwards; }
+
+/* ── Layout ── */
+.two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; align-items: start; }
+.col { display: flex; flex-direction: column; gap: 16px; }
+
+/* ── Sec label ── */
+.sec {
+  font-family: var(--mono); font-size: 10px; font-weight: 600;
+  letter-spacing: .16em; text-transform: uppercase;
+  color: var(--muted); margin-bottom: 10px;
+  display: flex; align-items: center; gap: 10px;
+}
+.sec::after { content:''; flex:1; height:1px; background: var(--border); }
+
+/* ── Narr card ── */
+.narr {
+  background: rgba(0,229,255,.04);
+  border: 1px solid rgba(0,229,255,.12);
+  border-left: 3px solid var(--cyan);
+  border-radius: 0 var(--r-md) var(--r-md) 0;
+  padding: 16px 18px;
+}
+.narr-amber  { background: rgba(255,179,0,.04);  border-color: rgba(255,179,0,.12);  border-left-color: var(--amber); }
+.narr-green  { background: rgba(0,230,118,.04);  border-color: rgba(0,230,118,.12);  border-left-color: var(--green); }
+.narr-purple { background: rgba(179,136,255,.04);border-color: rgba(179,136,255,.12);border-left-color: var(--purple); }
+.narr-red    { background: rgba(255,82,82,.04);  border-color: rgba(255,82,82,.12);  border-left-color: var(--red); }
+
+.narr-label {
+  font-family: var(--mono); font-size: 10px; font-weight: 600;
+  letter-spacing: .14em; text-transform: uppercase;
+  color: var(--cyan); margin-bottom: 8px;
+  display: flex; align-items: center; gap: 6px;
+}
+.narr-label .dot {
+  width: 6px; height: 6px; border-radius: 50%; background: var(--cyan);
+  animation: pulse 2s ease-in-out infinite;
+}
+@keyframes pulse {
+  0%,100% { opacity: 1; transform: scale(1); }
+  50%      { opacity: .4; transform: scale(.7); }
+}
+.narr p { font-size: 13px; color: var(--text2); line-height: 1.8; }
+.narr p strong { color: var(--text1); font-weight: 500; }
+
+/* ── Code window ── */
+.code-win {
+  background: #07090f; border: 1px solid var(--border);
+  border-radius: var(--r-lg); overflow: hidden;
+}
+.code-top {
+  background: #0d1018; padding: 10px 16px;
+  display: flex; align-items: center; justify-content: space-between;
+  border-bottom: 1px solid var(--border);
+}
+.code-dots { display: flex; gap: 6px; }
+.code-dots span { width: 10px; height: 10px; border-radius: 50%; }
+.cd-r{background:#ff5f57} .cd-y{background:#ffbd2e} .cd-g{background:#28c840}
+.code-filename { font-family: var(--mono); font-size: 11px; color: var(--text3); letter-spacing: .04em; }
+.code-body {
+  padding: 16px 20px; font-family: var(--mono); font-size: 12px;
+  line-height: 1.85; overflow-x: auto; white-space: pre;
+  max-height: 380px; overflow-y: auto;
+  scrollbar-width: thin; scrollbar-color: var(--bg3) transparent;
+}
+.ck { color: #7eb6f6; }
+.cv { color: #b5c07a; }
+.cs { color: #f0a070; }
+.cc { color: #4a617a; font-style: italic; }
+.cm { color: #4ec9b0; font-weight: 600; }
+.cf { color: #79c0ff; }
+.ca { color: var(--amber); }
+.cg { color: var(--green); }
+.cp { color: var(--purple); }
+.cr { color: var(--red); }
+
+/* ── KV table ── */
+.kv {
+  width: 100%; border-collapse: collapse;
+  background: var(--bg2); border: 1px solid var(--border);
+  border-radius: var(--r-md); overflow: hidden; font-size: 12.5px;
+}
+.kv thead th {
+  padding: 10px 14px; font-family: var(--mono); font-size: 10px; font-weight: 600;
+  letter-spacing: .1em; text-transform: uppercase; color: var(--text3);
+  background: var(--bg3); border-bottom: 1px solid var(--border); text-align: left;
+}
+.kv tbody td { padding: 11px 14px; border-bottom: 1px solid var(--border); vertical-align: top; }
+.kv tbody tr:last-child td { border-bottom: none; }
+.kv tbody tr:hover td { background: rgba(255,255,255,.025); }
+.kv td:first-child { font-family: var(--mono); font-size: 11.5px; color: var(--cyan); width: 38%; }
+.kv td:last-child  { color: var(--text2); line-height: 1.6; }
+.kv td code {
+  font-family: var(--mono); font-size: 11px;
+  background: rgba(255,255,255,.06); border-radius: 3px; padding: 1px 5px; color: var(--text1);
+}
+.kv-amber  td:first-child { color: var(--amber); }
+.kv-green  td:first-child { color: var(--green); }
+.kv-purple td:first-child { color: var(--purple); }
+.kv-red    td:first-child { color: var(--red); }
+
+/* ── Role cards ── */
+.role-grid { display: grid; grid-template-columns: repeat(3,1fr); gap: 16px; margin-top: 4px; }
+.role-card {
+  background: var(--bg2); border: 1px solid var(--border);
+  border-radius: var(--r-lg); overflow: hidden;
+  transition: border-color .2s, transform .2s;
+}
+.role-card:hover { border-color: var(--border-hi); transform: translateY(-3px); }
+.role-head {
+  padding: 14px 16px 12px; font-size: 13px; font-weight: 600;
+  display: flex; align-items: center; gap: 8px; border-bottom: 1px solid var(--border);
+}
+.role-icon {
+  width: 28px; height: 28px; border-radius: var(--r-sm);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 14px; flex-shrink: 0;
+}
+.role-body { padding: 14px 16px; font-size: 12.5px; color: var(--text2); line-height: 1.7; }
+.role-body code {
+  font-family: var(--mono); font-size: 11px;
+  background: rgba(255,255,255,.06); border-radius: 3px; padding: 1px 5px; color: var(--text1);
+}
+.role-meta { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; }
+.tag { font-family: var(--mono); font-size: 10px; padding: 2px 8px; border-radius: 4px; border: 1px solid; }
+
+/* ── Flow ── */
+.flow-wrap { margin: 4px 0 20px; }
+.flow { display: flex; align-items: center; gap: 0; overflow-x: auto; padding-bottom: 8px; }
+.fn {
+  flex-shrink: 0; min-width: 120px; background: var(--bg2);
+  border: 1px solid var(--border); border-radius: var(--r-md);
+  padding: 12px 14px; text-align: center;
+}
+.fn-title { font-size: 12px; font-weight: 600; margin-bottom: 3px; }
+.fn-sub   { font-family: var(--mono); font-size: 10px; color: var(--text3); }
+.fa {
+  flex-shrink: 0; display: flex; flex-direction: column;
+  align-items: center; padding: 0 8px; gap: 3px;
+}
+.fa-line {
+  width: 40px; height: 1px;
+  background: linear-gradient(90deg, var(--border), var(--border-hi), var(--border));
+  position: relative;
+}
+.fa-line::after {
+  content: ''; position: absolute; right: -4px; top: -3px;
+  border: 4px solid transparent; border-left-color: var(--border-hi);
+}
+.fa-lbl { font-family: var(--mono); font-size: 9px; color: var(--text3); letter-spacing: .06em; }
+
+/* ── Tip ── */
+.tip {
+  border: 1px solid rgba(255,179,0,.2); background: rgba(255,179,0,.04);
+  border-radius: var(--r-md); padding: 12px 14px;
+  font-size: 12px; color: var(--text2); line-height: 1.7;
+}
+.tip strong { color: var(--amber); font-weight: 500; }
+.tip-green  { border-color: rgba(0,230,118,.2);  background: rgba(0,230,118,.04); }
+.tip-green strong { color: var(--green); }
+.tip-purple { border-color: rgba(179,136,255,.2); background: rgba(179,136,255,.04); }
+.tip-purple strong { color: var(--purple); }
+.tip-red    { border-color: rgba(255,82,82,.2);   background: rgba(255,82,82,.04); }
+.tip-red strong { color: var(--red); }
+
+/* ── Stats ── */
+.stats { display: grid; grid-template-columns: repeat(4,1fr); gap: 12px; margin-bottom: 20px; }
+.stat {
+  background: var(--bg2); border: 1px solid var(--border);
+  border-radius: var(--r-md); padding: 14px 16px;
+}
+.stat-num { font-family: var(--mono); font-size: 22px; font-weight: 600; line-height: 1; margin-bottom: 4px; }
+.stat-lbl { font-size: 11px; color: var(--text3); }
+</style>
+</head>
+<body>
+
+<div class="bg"></div>
+<div class="bg-dots"></div>
+
+<div class="shell">
+
+  <!-- Header -->
+  <header>
+    <div class="header-left">
+      <span class="header-eyebrow">SGLang  ·  P/D Disaggregation  ·  namespace: sglang</span>
+      <span class="header-title">Prefill / Decode Disaggregation on AMD MI300X</span>
+      <span class="header-sub">llama3-1b  ·  SGLang v0.5.8-rocm700-mi30x  ·  TP=2  ·  fp8 quantization  ·  K8s Deployments</span>
+    </div>
+    <div class="chips">
+      <span class="chip chip-amd">AMD MI300X  ×4 GPUs</span>
+      <span class="chip chip-sg">SGLang v0.5.8-rocm700</span>
+      <span class="chip chip-k8">namespace: sglang</span>
+    </div>
+  </header>
+
+  <!-- Tab nav -->
+  <nav>
+    <div class="prog-track"><div class="prog-fill" id="prog"></div></div>
+    <button class="tab-btn active" data-tab="overview">01  Overview</button>
+    <button class="tab-btn" data-tab="prefill">02  Prefill</button>
+    <button class="tab-btn" data-tab="decode">03  Decode</button>
+    <button class="tab-btn" data-tab="lb">04  Load Balancer</button>
+    <button class="tab-btn" data-tab="benchmark">05  Benchmark</button>
+  </nav>
+
+  <!-- Panels -->
+  <div class="panels">
+
+    <!-- ══ OVERVIEW ══════════════════════════════════════ -->
+    <div class="panel active" id="tab-overview">
+
+      <div class="stats">
+        <div class="stat"><div class="stat-num" style="color:var(--cyan)">4</div><div class="stat-lbl">Total GPUs (MI300X)</div></div>
+        <div class="stat"><div class="stat-num" style="color:var(--amber)">2</div><div class="stat-lbl">Prefill GPUs  (TP=2)</div></div>
+        <div class="stat"><div class="stat-num" style="color:var(--green)">2</div><div class="stat-lbl">Decode GPUs  (TP=2)</div></div>
+        <div class="stat"><div class="stat-num" style="color:var(--purple)">3</div><div class="stat-lbl">Deployments  (P · D · LB)</div></div>
+      </div>
+
+      <div class="narr" style="margin-bottom:20px">
+        <div class="narr-label"><span class="dot"></span>Architecture</div>
+        <p>This setup deploys SGLang prefill-decode disaggregation across <strong>two independent Kubernetes Deployments</strong> in the <code>sglang</code> namespace. The <strong>prefill server</strong> uses 2× AMD MI300X GPUs (TP=2) and runs in <code>--disaggregation-mode prefill</code>, exposing both an HTTP port (<code>8898</code>) and a gRPC bootstrap port (<code>8998</code>) for KV handoff. The <strong>decode server</strong> also uses 2× MI300X (TP=2) in <code>--disaggregation-mode decode</code> with torch-compile enabled. A <strong>mini load balancer</strong> coordinates routing between them via the SGLang disaggregation protocol.</p>
+      </div>
+
+      <div class="sec">Request flow</div>
+      <div class="flow-wrap">
+        <div class="flow">
+          <div class="fn">
+            <div class="fn-title" style="color:var(--text2)">Client</div>
+            <div class="fn-sub">HTTP  ·  port 8002</div>
+          </div>
+          <div class="fa"><div class="fa-line"></div><div class="fa-lbl">NodePort</div></div>
+          <div class="fn" style="border-color:rgba(0,229,255,.3)">
+            <div class="fn-title" style="color:var(--cyan)">Mini LB</div>
+            <div class="fn-sub">sglang-lb:8000</div>
+          </div>
+          <div class="fa"><div class="fa-line"></div><div class="fa-lbl">route</div></div>
+          <div class="fn" style="border-color:rgba(255,179,0,.3)">
+            <div class="fn-title" style="color:var(--amber)">Prefill</div>
+            <div class="fn-sub">:8898  ·  TP=2  ·  fp8</div>
+          </div>
+          <div class="fa">
+            <div class="fa-line" style="background:linear-gradient(90deg,rgba(179,136,255,.2),rgba(179,136,255,.8),rgba(179,136,255,.2))">
+              <div style="position:absolute;right:-4px;top:-3px;border:4px solid transparent;border-left-color:rgba(179,136,255,.7)"></div>
+            </div>
+            <div class="fa-lbl" style="color:var(--purple)">gRPC :8998</div>
+          </div>
+          <div class="fn" style="border-color:rgba(0,230,118,.3)">
+            <div class="fn-title" style="color:var(--green)">Decode</div>
+            <div class="fn-sub">:8898  ·  TP=2  ·  fp8</div>
+          </div>
+          <div class="fa"><div class="fa-line"></div><div class="fa-lbl">stream</div></div>
+          <div class="fn">
+            <div class="fn-title" style="color:var(--text2)">Tokens</div>
+            <div class="fn-sub">generated response</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="sec">Services</div>
+      <div class="role-grid">
+        <div class="role-card">
+          <div class="role-head">
+            <div class="role-icon" style="background:rgba(255,179,0,.1)">⚡</div>
+            <span style="color:var(--amber)">sglang-prefill</span>
+          </div>
+          <div class="role-body">
+            SGLang in <code>--disaggregation-mode prefill</code>. TP=2 across 2×MI300X. Exposes HTTP on <code>8898</code> and gRPC bootstrap on <code>8998</code>. fp8 quantization, <code>--mem-fraction-static 0.9</code>, radix cache disabled.
+            <div class="role-meta">
+              <span class="tag" style="color:var(--amber);border-color:rgba(255,179,0,.2)">2 GPUs</span>
+              <span class="tag" style="color:var(--amber);border-color:rgba(255,179,0,.2)">TP=2</span>
+              <span class="tag" style="color:var(--text3);border-color:var(--border)">fp8</span>
+              <span class="tag" style="color:var(--text3);border-color:var(--border)">NodePort</span>
+            </div>
+          </div>
+        </div>
+        <div class="role-card">
+          <div class="role-head">
+            <div class="role-icon" style="background:rgba(0,230,118,.1)">🔄</div>
+            <span style="color:var(--green)">sglang-decode</span>
+          </div>
+          <div class="role-body">
+            SGLang in <code>--disaggregation-mode decode</code>. TP=2 across 2×MI300X. <code>--enable-torch-compile</code>, <code>--disable-cuda-graph</code>, fp8, <code>--mem-fraction-static 0.7</code>. KV bootstrap from prefill on port <code>8998</code>.
+            <div class="role-meta">
+              <span class="tag" style="color:var(--green);border-color:rgba(0,230,118,.2)">2 GPUs</span>
+              <span class="tag" style="color:var(--green);border-color:rgba(0,230,118,.2)">TP=2</span>
+              <span class="tag" style="color:var(--text3);border-color:var(--border)">torch-compile</span>
+              <span class="tag" style="color:var(--text3);border-color:var(--border)">fp8</span>
+            </div>
+          </div>
+        </div>
+        <div class="role-card">
+          <div class="role-head">
+            <div class="role-icon" style="background:rgba(0,229,255,.1)">🚦</div>
+            <span style="color:var(--cyan)">sglang-lb</span>
+          </div>
+          <div class="role-body">
+            SGLang <code>mini_lb</code> module. Receives client requests on port <code>8000</code> (NodePort <code>8002</code>), routes to prefill and decode via their K8s service DNS names.
+            <div class="role-meta">
+              <span class="tag" style="color:var(--cyan);border-color:rgba(0,229,255,.2)">1 GPU</span>
+              <span class="tag" style="color:var(--cyan);border-color:rgba(0,229,255,.2)">NodePort 8002</span>
+              <span class="tag" style="color:var(--text3);border-color:var(--border)">v0.4.7</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ══ PREFILL ════════════════════════════════════════ -->
+    <div class="panel" id="tab-prefill">
+      <div class="two-col">
+        <div class="col">
+          <div class="narr narr-amber">
+            <div class="narr-label" style="color:var(--amber)"><span class="dot" style="background:var(--amber)"></span>Prefill Server</div>
+            <p>The prefill deployment processes the full input prompt and builds the KV cache using <strong>TP=2 across 2× AMD MI300X GPUs</strong>. It exposes <strong>two ports</strong>: the standard HTTP API on <code>8898</code> for receiving requests from the load balancer, and a dedicated <strong>gRPC bootstrap port on <code>8998</code></strong> used by the disaggregation protocol to transfer KV tensors to the decode server. fp8 quantization reduces memory pressure, allowing <code>--mem-fraction-static 0.9</code>.</p>
+          </div>
+
+          <div>
+            <div class="sec">Launch arguments</div>
+            <table class="kv kv-amber">
+              <thead><tr><th>Argument</th><th>Value &amp; purpose</th></tr></thead>
+              <tbody>
+                <tr><td>--disaggregation-mode</td><td><code>prefill</code> — processes prompt, builds KV, never decodes</td></tr>
+                <tr><td>--disaggregation-bootstrap-port</td><td><code>8998</code> — gRPC port for KV handoff to decode server</td></tr>
+                <tr><td>--tp-size</td><td><code>2</code> — tensor parallel across 2 MI300X GPUs</td></tr>
+                <tr><td>--base-gpu-id</td><td><code>0</code> — start GPU assignment from device 0</td></tr>
+                <tr><td>--quantization</td><td><code>fp8</code> — 8-bit float reduces VRAM and speeds transfers</td></tr>
+                <tr><td>--mem-fraction-static</td><td><code>0.9</code> — 90% VRAM reserved for KV cache pool</td></tr>
+                <tr><td>--disable-radix-cache</td><td>Disabled — prevents cache interference in disagg mode</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="tip">
+            <strong>Two ports required:</strong> The prefill Service exposes both <code>8898</code> (HTTP/named <code>http</code>) and <code>8998</code> (gRPC/named <code>grpc-bootstrap</code>). The load balancer hits <code>8898</code>; the decode server connects to <code>8998</code> to pull KV tensors. Both must be reachable via the <code>sglang-prefill</code> ClusterIP Service.
+          </div>
+        </div>
+
+        <div class="col">
+          <div class="code-win">
+            <div class="code-top">
+              <div class="code-dots"><span class="cd-r"></span><span class="cd-y"></span><span class="cd-g"></span></div>
+              <span class="code-filename">sglang-prefill  ·  Deployment</span>
+            </div>
+            <div class="code-body"><span class="ck">apiVersion</span>: <span class="cm">apps/v1</span>
+<span class="ck">kind</span>:       <span class="cm">Deployment</span>
+<span class="ck">metadata</span>:
+  <span class="ck">name</span>:      <span class="cs">sglang-prefill</span>
+  <span class="ck">namespace</span>: <span class="cs">sglang</span>
+<span class="ck">spec</span>:
+  <span class="ck">replicas</span>: <span class="cv">1</span>
+  <span class="ck">template</span>:
+    <span class="ck">spec</span>:
+      <span class="ck">containers</span>:
+      - <span class="ck">name</span>:  <span class="cs">sglang-prefill</span>
+        <span class="ck">image</span>: <span class="cs">lmsysorg/sglang:v0.5.8-rocm700-mi30x</span>
+        <span class="ck">resources</span>:
+          <span class="ck">limits</span>:
+            <span class="ca">amd.com/gpu</span>: <span class="cv">2</span>
+        <span class="ck">command</span>: [<span class="cs">"python3"</span>, <span class="cs">"-m"</span>, <span class="cs">"sglang.launch_server"</span>]
+        <span class="ck">args</span>:
+          - <span class="ca">--disaggregation-mode</span>
+          - <span class="cs">prefill</span>
+          - <span class="ca">--disaggregation-bootstrap-port</span>
+          - <span class="cv">"8998"</span>
+          - <span class="ck">--model-path</span>
+          - <span class="cs">/models/llama3-1b</span>
+          - <span class="ck">--port</span>
+          - <span class="cv">"8898"</span>
+          - <span class="ck">--tp-size</span>
+          - <span class="cv">"2"</span>
+          - <span class="ck">--base-gpu-id</span>
+          - <span class="cv">"0"</span>
+          - <span class="ck">--quantization</span>
+          - <span class="cs">fp8</span>
+          - <span class="ck">--mem-fraction-static</span>
+          - <span class="cv">"0.9"</span>
+          - <span class="ck">--disable-radix-cache</span>
+          - <span class="ck">--trust-remote-code</span>
+          - <span class="ck">--stream-output</span>
+        <span class="ck">securityContext</span>:
+          <span class="ck">privileged</span>: <span class="cv">true</span>
+          <span class="ck">capabilities</span>:
+            <span class="ck">add</span>: [<span class="ca">"SYS_ADMIN"</span>, <span class="ca">"SYS_PTRACE"</span>]
+        <span class="ck">ports</span>:
+        - <span class="ck">name</span>: <span class="cs">http</span>
+          <span class="ck">containerPort</span>: <span class="cv">8898</span>
+        - <span class="ck">name</span>: <span class="cs">grpc-bootstrap</span>
+          <span class="ck">containerPort</span>: <span class="cv">8998</span>
+        <span class="ck">volumeMounts</span>:
+        - <span class="ck">name</span>: <span class="cs">models</span>
+          <span class="ck">mountPath</span>: <span class="cs">/models</span>
+      <span class="ck">volumes</span>:
+      - <span class="ck">name</span>: <span class="cs">models</span>
+        <span class="ck">hostPath</span>:
+          <span class="ck">path</span>: <span class="cs">/home/amd/models</span></div>
+          </div>
+
+          <div class="code-win">
+            <div class="code-top">
+              <div class="code-dots"><span class="cd-r"></span><span class="cd-y"></span><span class="cd-g"></span></div>
+              <span class="code-filename">sglang-prefill  ·  Service</span>
+            </div>
+            <div class="code-body"><span class="ck">apiVersion</span>: <span class="cm">v1</span>
+<span class="ck">kind</span>:       <span class="cm">Service</span>
+<span class="ck">metadata</span>:
+  <span class="ck">name</span>:      <span class="cs">sglang-prefill</span>
+  <span class="ck">namespace</span>: <span class="cs">sglang</span>
+<span class="ck">spec</span>:
+  <span class="ck">selector</span>:
+    <span class="ck">app</span>: <span class="cs">sglang-prefill</span>
+  <span class="ck">type</span>: <span class="cs">NodePort</span>
+  <span class="ck">ports</span>:
+    - <span class="ck">name</span>:       <span class="ca">http</span>
+      <span class="ck">port</span>:       <span class="cv">8898</span>
+      <span class="ck">targetPort</span>: <span class="cv">8898</span>
+    - <span class="ck">name</span>:       <span class="ca">grpc-bootstrap</span>    <span class="cc"># KV handoff to decode</span>
+      <span class="ck">port</span>:       <span class="cv">8998</span>
+      <span class="ck">targetPort</span>: <span class="cv">8998</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ══ DECODE ═════════════════════════════════════════ -->
+    <div class="panel" id="tab-decode">
+      <div class="two-col">
+        <div class="col">
+          <div class="narr narr-green">
+            <div class="narr-label" style="color:var(--green)"><span class="dot" style="background:var(--green)"></span>Decode Server</div>
+            <p>The decode deployment receives KV tensors from the prefill server via the gRPC bootstrap port, then performs <strong>pure autoregressive token generation</strong> using 2× AMD MI300X GPUs (TP=2). <strong><code>--enable-torch-compile</code></strong> is set for optimised ROCm kernel fusion during generation. <strong><code>--disable-cuda-graph</code></strong> is required because CUDA graphs conflict with the KV injection mechanism used by the disaggregation protocol. Memory fraction is lower (<code>0.7</code>) since the decode side holds received KV — not a full static pool.</p>
+          </div>
+
+          <div>
+            <div class="sec">Launch arguments</div>
+            <table class="kv kv-green">
+              <thead><tr><th>Argument</th><th>Value &amp; purpose</th></tr></thead>
+              <tbody>
+                <tr><td>--disaggregation-mode</td><td><code>decode</code> — receives KV from prefill, generates tokens only</td></tr>
+                <tr><td>--disaggregation-bootstrap-port</td><td><code>8998</code> — connects to <em>prefill's</em> gRPC port to pull KV cache</td></tr>
+                <tr><td>--tp-size</td><td><code>2</code> — tensor parallel across 2 MI300X GPUs</td></tr>
+                <tr><td>--quantization</td><td><code>fp8</code> — must match prefill quantization for KV compatibility</td></tr>
+                <tr><td>--mem-fraction-static</td><td><code>0.7</code> — lower than prefill; decode holds received KV tensors</td></tr>
+                <tr><td>--enable-torch-compile</td><td>Fuses ROCm kernels — improves decode throughput on MI300X</td></tr>
+                <tr><td>--disable-cuda-graph</td><td>Required — CUDA graphs are incompatible with KV injection</td></tr>
+                <tr><td>--disable-radix-cache</td><td>Disabled — no prefix caching needed in decode-only mode</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="tip tip-green">
+            <strong>fp8 must match:</strong> Prefill and decode both set <code>--quantization fp8</code>. The KV tensors transferred over gRPC are already in fp8 format — if the decode server uses a different dtype the KV injection will silently corrupt attention outputs.
+          </div>
+        </div>
+
+        <div class="col">
+          <div class="code-win">
+            <div class="code-top">
+              <div class="code-dots"><span class="cd-r"></span><span class="cd-y"></span><span class="cd-g"></span></div>
+              <span class="code-filename">sglang-decode  ·  Deployment</span>
+            </div>
+            <div class="code-body"><span class="ck">apiVersion</span>: <span class="cm">apps/v1</span>
+<span class="ck">kind</span>:       <span class="cm">Deployment</span>
+<span class="ck">metadata</span>:
+  <span class="ck">name</span>:      <span class="cs">sglang-decode</span>
+  <span class="ck">namespace</span>: <span class="cs">sglang</span>
+<span class="ck">spec</span>:
+  <span class="ck">replicas</span>: <span class="cv">1</span>
+  <span class="ck">template</span>:
+    <span class="ck">spec</span>:
+      <span class="ck">containers</span>:
+      - <span class="ck">name</span>:  <span class="cs">sglang-decode</span>
+        <span class="ck">image</span>: <span class="cs">lmsysorg/sglang:v0.5.8-rocm700-mi30x</span>
+        <span class="ck">resources</span>:
+          <span class="ck">limits</span>:
+            <span class="ca">amd.com/gpu</span>: <span class="cv">2</span>
+        <span class="ck">command</span>: [<span class="cs">"python3"</span>, <span class="cs">"-m"</span>, <span class="cs">"sglang.launch_server"</span>]
+        <span class="ck">args</span>:
+          - <span class="ca">--disaggregation-mode</span>
+          - <span class="cs">decode</span>
+          - <span class="ca">--disaggregation-bootstrap-port</span>
+          - <span class="cv">"8998"</span>
+          - <span class="ck">--model-path</span>
+          - <span class="cs">/models/llama3-1b</span>
+          - <span class="ck">--port</span>
+          - <span class="cv">"8898"</span>
+          - <span class="ck">--tp-size</span>
+          - <span class="cv">"2"</span>
+          - <span class="ck">--base-gpu-id</span>
+          - <span class="cv">"0"</span>
+          - <span class="ck">--quantization</span>
+          - <span class="cs">fp8</span>
+          - <span class="ck">--mem-fraction-static</span>
+          - <span class="cv">"0.7"</span>
+          - <span class="ck">--disable-radix-cache</span>
+          - <span class="ca">--enable-torch-compile</span>
+          - <span class="ca">--disable-cuda-graph</span>
+          - <span class="ck">--trust-remote-code</span>
+          - <span class="ck">--stream-output</span>
+        <span class="ck">securityContext</span>:
+          <span class="ck">privileged</span>: <span class="cv">true</span>
+          <span class="ck">capabilities</span>:
+            <span class="ck">add</span>: [<span class="ca">"SYS_ADMIN"</span>, <span class="ca">"SYS_PTRACE"</span>]
+        <span class="ck">volumeMounts</span>:
+        - <span class="ck">name</span>: <span class="cs">models</span>
+          <span class="ck">mountPath</span>: <span class="cs">/models</span>
+      <span class="ck">volumes</span>:
+      - <span class="ck">name</span>: <span class="cs">models</span>
+        <span class="ck">hostPath</span>:
+          <span class="ck">path</span>: <span class="cs">/home/amd/models</span></div>
+          </div>
+
+          <div class="code-win">
+            <div class="code-top">
+              <div class="code-dots"><span class="cd-r"></span><span class="cd-y"></span><span class="cd-g"></span></div>
+              <span class="code-filename">sglang-decode  ·  Service</span>
+            </div>
+            <div class="code-body"><span class="ck">apiVersion</span>: <span class="cm">v1</span>
+<span class="ck">kind</span>:       <span class="cm">Service</span>
+<span class="ck">metadata</span>:
+  <span class="ck">name</span>:      <span class="cs">sglang-decode</span>
+  <span class="ck">namespace</span>: <span class="cs">sglang</span>
+<span class="ck">spec</span>:
+  <span class="ck">selector</span>:
+    <span class="ck">app</span>: <span class="cs">sglang-decode</span>
+  <span class="ck">type</span>: <span class="cs">NodePort</span>
+  <span class="ck">ports</span>:
+    - <span class="ck">name</span>:       <span class="ca">http</span>
+      <span class="ck">port</span>:       <span class="cv">8898</span>
+      <span class="ck">targetPort</span>: <span class="cv">8898</span>
+      <span class="cc"># Only HTTP — no grpc-bootstrap on decode service</span>
+      <span class="cc"># Decode connects outbound to prefill:8998 for KV pull</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ══ LOAD BALANCER ══════════════════════════════════ -->
+    <div class="panel" id="tab-lb">
+      <div class="two-col">
+        <div class="col">
+          <div class="narr">
+            <div class="narr-label"><span class="dot"></span>Mini Load Balancer</div>
+            <p>The <code>sglang.srt.disaggregation.mini_lb</code> module acts as the <strong>disaggregation-aware request coordinator</strong>. It receives all client traffic on port <code>8000</code> (NodePort <code>8002</code>) and forwards requests to the prefill and decode servers using their K8s cluster-internal DNS names. It understands the SGLang P/D protocol — it knows to send the prompt to prefill first, wait for KV bootstrap to complete, then forward to decode for generation. Image is <strong>v0.4.7</strong> (older stable LB build).</p>
+          </div>
+
+          <div>
+            <div class="sec">Load balancer config</div>
+            <table class="kv">
+              <thead><tr><th>Argument</th><th>Value &amp; purpose</th></tr></thead>
+              <tbody>
+                <tr><td>--prefill</td><td><code>http://sglang-prefill:8898</code> — K8s DNS to prefill HTTP port</td></tr>
+                <tr><td>--decode</td><td><code>http://sglang-decode:8898</code> — K8s DNS to decode HTTP port</td></tr>
+                <tr><td>Listen port</td><td><code>8000</code> internal → <code>8002</code> NodePort (client-facing)</td></tr>
+                <tr><td>Image version</td><td><code>lmsysorg/sglang:v0.4.7.post1-rocm630</code> — pinned stable LB build</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="tip">
+            <strong>Why a separate image version?</strong> The mini_lb module is pinned to <code>v0.4.7.post1-rocm630</code> — a stable LB-only build. The prefill/decode pods use <code>v0.5.8-rocm700-mi30x</code> for the latest disaggregation engine. The LB only proxies HTTP — no GPU compute is needed, though 1 GPU is allocated in the manifest.
+          </div>
+
+          <div>
+            <div class="sec">Port map</div>
+            <table class="kv">
+              <thead><tr><th>Service</th><th>ClusterIP port</th><th>NodePort</th><th>Purpose</th></tr></thead>
+              <tbody>
+                <tr><td>sglang-lb</td><td><code>8002 → 8000</code></td><td><code>8002</code></td><td>Client entry point</td></tr>
+                <tr><td>sglang-prefill</td><td><code>8898</code></td><td>auto</td><td>HTTP from LB + decode</td></tr>
+                <tr><td>sglang-prefill</td><td><code>8998</code></td><td>auto</td><td>gRPC KV bootstrap</td></tr>
+                <tr><td>sglang-decode</td><td><code>8898</code></td><td>auto</td><td>HTTP from LB</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="col">
+          <div class="code-win">
+            <div class="code-top">
+              <div class="code-dots"><span class="cd-r"></span><span class="cd-y"></span><span class="cd-g"></span></div>
+              <span class="code-filename">sglang-lb  ·  Deployment + Service</span>
+            </div>
+            <div class="code-body"><span class="ck">apiVersion</span>: <span class="cm">v1</span>
+<span class="ck">kind</span>:       <span class="cm">Service</span>
+<span class="ck">metadata</span>:
+  <span class="ck">name</span>:      <span class="cs">sglang-lb</span>
+  <span class="ck">namespace</span>: <span class="cs">sglang</span>
+<span class="ck">spec</span>:
+  <span class="ck">selector</span>:
+    <span class="ck">app</span>: <span class="cs">sglang-lb</span>
+  <span class="ck">type</span>: <span class="cs">NodePort</span>
+  <span class="ck">ports</span>:
+    - <span class="ck">port</span>:       <span class="cv">8002</span>
+      <span class="ck">targetPort</span>: <span class="cv">8000</span>  <span class="cc"># client hits :8002 → container :8000</span>
+---
+<span class="ck">apiVersion</span>: <span class="cm">apps/v1</span>
+<span class="ck">kind</span>:       <span class="cm">Deployment</span>
+<span class="ck">metadata</span>:
+  <span class="ck">name</span>:      <span class="cs">sglang-lb</span>
+  <span class="ck">namespace</span>: <span class="cs">sglang</span>
+<span class="ck">spec</span>:
+  <span class="ck">replicas</span>: <span class="cv">1</span>
+  <span class="ck">template</span>:
+    <span class="ck">spec</span>:
+      <span class="ck">containers</span>:
+      - <span class="ck">name</span>:  <span class="cs">sglang-lb</span>
+        <span class="ck">image</span>: <span class="cs">lmsysorg/sglang:v0.4.7.post1-rocm630</span>
+        <span class="ck">resources</span>:
+          <span class="ck">limits</span>:
+            <span class="ca">amd.com/gpu</span>: <span class="cv">1</span>
+        <span class="ck">command</span>: [<span class="cs">"python3"</span>, <span class="cs">"-m"</span>,
+                   <span class="cs">"sglang.srt.disaggregation.mini_lb"</span>]
+        <span class="ck">args</span>:
+          - <span class="ca">--prefill</span>
+          - <span class="cs">http://sglang-prefill:8898</span>
+          - <span class="ca">--decode</span>
+          - <span class="cs">http://sglang-decode:8898</span>
+        <span class="ck">securityContext</span>:
+          <span class="ck">privileged</span>: <span class="cv">true</span>
+          <span class="ck">capabilities</span>:
+            <span class="ck">add</span>: [<span class="ca">"SYS_ADMIN"</span>, <span class="ca">"SYS_PTRACE"</span>]</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ══ BENCHMARK ══════════════════════════════════════ -->
+    <div class="panel" id="tab-benchmark">
+      <div class="two-col">
+        <div class="col">
+          <div class="narr narr-purple">
+            <div class="narr-label" style="color:var(--purple)"><span class="dot" style="background:var(--purple)"></span>Benchmark Job</div>
+            <p>A Kubernetes <strong>batch Job</strong> (<code>bmk-client</code>) runs <code>benchmark_serving.py</code> from the vLLM benchmark suite against the <code>sglang-lb</code> endpoint. It measures <strong>TTFT, TPOT, ITL, and E2E latency</strong> at the 95th and 99th percentiles. The workload simulates <strong>256 prompts</strong> with 1024 input tokens and 128 output tokens at a request rate of 8 req/s with max concurrency of 64. Results are saved to <code>/models/results/sglang_benchmark.json</code>.</p>
+          </div>
+
+          <div>
+            <div class="sec">Benchmark parameters</div>
+            <table class="kv kv-purple">
+              <thead><tr><th>Flag</th><th>Value &amp; purpose</th></tr></thead>
+              <tbody>
+                <tr><td>--backend</td><td><code>sglang</code> — uses SGLang-compatible request format</td></tr>
+                <tr><td>--base-url</td><td><code>http://sglang-lb:8002</code> — hits the mini LB NodePort</td></tr>
+                <tr><td>--request-rate</td><td><code>8</code> req/s — sustained throughput target</td></tr>
+                <tr><td>--max-concurrency</td><td><code>64</code> — max in-flight requests</td></tr>
+                <tr><td>--num-prompts</td><td><code>256</code> — total requests in the benchmark run</td></tr>
+                <tr><td>--random-input-len</td><td><code>1024</code> tokens — simulates medium-length prompts</td></tr>
+                <tr><td>--random-output-len</td><td><code>128</code> tokens — short generation target</td></tr>
+                <tr><td>--random-range-ratio</td><td><code>0.8</code> — 80% variance in prompt length</td></tr>
+                <tr><td>--percentile-metrics</td><td><code>ttft,tpot,itl,e2el</code> — all key latency dimensions</td></tr>
+                <tr><td>--metric-percentiles</td><td><code>95,99</code> — tail latency focus</td></tr>
+                <tr><td>--goodput</td><td><code>tpot:25</code> — SLA: TPOT must be ≤ 25 ms to count as goodput</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="tip tip-purple">
+            <strong>Results location:</strong> <code>/models/results/sglang_benchmark.json</code> on the node's hostPath <code>/home/amd/models</code>. The Job uses <code>backoffLimit: 0</code> — it will not retry on failure, so check logs immediately if it exits non-zero.
+          </div>
+        </div>
+
+        <div class="col">
+          <div class="code-win">
+            <div class="code-top">
+              <div class="code-dots"><span class="cd-r"></span><span class="cd-y"></span><span class="cd-g"></span></div>
+              <span class="code-filename">bmk-client  ·  batch/v1 Job</span>
+            </div>
+            <div class="code-body"><span class="ck">apiVersion</span>: <span class="cm">batch/v1</span>
+<span class="ck">kind</span>:       <span class="cm">Job</span>
+<span class="ck">metadata</span>:
+  <span class="ck">name</span>:      <span class="cs">bmk-client</span>
+  <span class="ck">namespace</span>: <span class="cs">sglang</span>
+<span class="ck">spec</span>:
+  <span class="ck">backoffLimit</span>: <span class="cv">0</span>   <span class="cc"># no retries on failure</span>
+  <span class="ck">template</span>:
+    <span class="ck">spec</span>:
+      <span class="ck">restartPolicy</span>: <span class="cs">Never</span>
+      <span class="ck">nodeSelector</span>:
+        <span class="ca">feature.node.kubernetes.io/amd-gpu</span>: <span class="cs">"true"</span>
+      <span class="ck">containers</span>:
+      - <span class="ck">name</span>: <span class="cs">bmk-client</span>
+        <span class="ck">image</span>: <span class="cs">rocm/vllm-dev:nightly_main_20250706</span>
+        <span class="ck">workingDir</span>: <span class="cs">/app/vllm/benchmarks</span>
+        <span class="ck">resources</span>:
+          <span class="ck">limits</span>:
+            <span class="ca">amd.com/gpu</span>: <span class="cv">1</span>
+        <span class="ck">command</span>: [<span class="cs">"python"</span>]
+        <span class="ck">args</span>:
+          - benchmark_serving.py
+          - <span class="ca">--backend</span>
+          - <span class="cs">sglang</span>
+          - <span class="ca">--base-url</span>
+          - <span class="cs">http://sglang-lb:8002</span>
+          - <span class="ck">--model</span>
+          - <span class="cs">/models/llama3-1b</span>
+          - <span class="ca">--percentile-metrics</span>
+          - <span class="cs">ttft,tpot,itl,e2el</span>
+          - <span class="ca">--metric-percentiles</span>
+          - <span class="cs">"95,99"</span>
+          - <span class="ck">--request-rate</span>
+          - <span class="cv">"8"</span>
+          - <span class="ck">--max-concurrency</span>
+          - <span class="cv">"64"</span>
+          - <span class="ck">--dataset-name</span>
+          - <span class="cs">random</span>
+          - <span class="ck">--random-input-len</span>
+          - <span class="cv">"1024"</span>
+          - <span class="ck">--random-output-len</span>
+          - <span class="cv">"128"</span>
+          - <span class="ck">--random-range-ratio</span>
+          - <span class="cv">"0.8"</span>
+          - <span class="ck">--num-prompts</span>
+          - <span class="cv">"256"</span>
+          - <span class="ca">--goodput</span>
+          - <span class="cs">tpot:25</span>
+          - <span class="ck">--save-result</span>
+          - <span class="ck">--result-dir</span>
+          - <span class="cs">/models/results</span>
+          - <span class="ck">--result-filename</span>
+          - <span class="cs">sglang_benchmark.json</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div><!-- /panels -->
+</div><!-- /shell -->
+
+<script>
+const tabs = document.querySelectorAll('.tab-btn');
+const prog = document.getElementById('prog');
+const DURATION = 12000;
+let cur = 0, t0 = Date.now();
+
+function switchTab(i) {
+  cur = i;
+  tabs.forEach((b,j) => b.classList.toggle('active', j===i));
+  document.querySelectorAll('.panel').forEach((p,j) => {
+    p.classList.remove('active');
+    if(j===i){ void p.offsetWidth; p.classList.add('active'); }
+  });
+  t0 = Date.now();
+}
+
+function tick() {
+  const elapsed = Date.now() - t0;
+  const pct = Math.min(elapsed / DURATION * 100, 100);
+  prog.style.width = pct + '%';
+  if(elapsed >= DURATION) switchTab((cur+1) % tabs.length);
+  requestAnimationFrame(tick);
+}
+
+tabs.forEach((b,i) => b.addEventListener('click', () => switchTab(i)));
+document.addEventListener('keydown', e => {
+  if(e.key === 'ArrowRight') switchTab((cur+1) % tabs.length);
+  if(e.key === 'ArrowLeft')  switchTab((cur-1+tabs.length) % tabs.length);
+});
+
+requestAnimationFrame(tick);
+</script>
+</body>
+</html>

@@ -1,0 +1,970 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>vLLM + LMCache — P/D Disaggregation on K8s</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg0: #060910;
+  --bg1: #0c1018;
+  --bg2: #111520;
+  --bg3: #161c28;
+  --border: rgba(255,255,255,0.07);
+  --border-hi: rgba(255,255,255,0.14);
+
+  --orange: #ff6b35;
+  --green:  #00e676;
+  --purple: #b388ff;
+  --amber:  #ffb300;
+  --red:    #ff5252;
+  --muted:  #546e8a;
+  --text1:  #e8edf5;
+  --text2:  #8fa3bb;
+  --text3:  #4a617a;
+
+  --mono: 'IBM Plex Mono', monospace;
+  --sans: 'DM Sans', sans-serif;
+
+  --r-sm: 6px;
+  --r-md: 10px;
+  --r-lg: 16px;
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body {
+  height: 100%;
+  background: var(--bg0);
+  color: var(--text1);
+  font-family: var(--sans);
+  font-size: 14px;
+  line-height: 1.6;
+  overflow: hidden;
+}
+
+/* ── Animated background ─────────────────────────────── */
+.bg {
+  position: fixed; inset: 0; z-index: 0; pointer-events: none;
+  background:
+    radial-gradient(ellipse 60% 40% at 80% 10%, rgba(255,107,53,.05) 0%, transparent 60%),
+    radial-gradient(ellipse 50% 30% at 10% 90%, rgba(0,230,118,.04) 0%, transparent 60%),
+    linear-gradient(180deg, #060910 0%, #080c14 100%);
+}
+.bg-dots {
+  position: fixed; inset: 0; z-index: 0; pointer-events: none;
+  background-image: radial-gradient(rgba(255,255,255,.018) 1px, transparent 1px);
+  background-size: 28px 28px;
+}
+
+/* ── Shell ───────────────────────────────────────────── */
+.shell {
+  position: relative; z-index: 1;
+  display: grid;
+  grid-template-rows: auto auto 1fr;
+  height: 100vh;
+  overflow: hidden;
+}
+
+/* ── Header ──────────────────────────────────────────── */
+header {
+  padding: 18px 32px 16px;
+  background: rgba(12,16,24,.85);
+  backdrop-filter: blur(16px);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+.header-left { display: flex; flex-direction: column; gap: 4px; }
+.header-eyebrow {
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+  color: var(--orange);
+  opacity: .8;
+}
+.header-title {
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--text1);
+  letter-spacing: -.3px;
+}
+.header-sub {
+  font-size: 12px;
+  color: var(--text2);
+  font-weight: 300;
+}
+.chips { display: flex; gap: 8px; flex-wrap: wrap; }
+.chip {
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 500;
+  padding: 4px 12px;
+  border-radius: 999px;
+  border: 1px solid;
+  letter-spacing: .04em;
+}
+.chip-vl  { color: var(--orange); border-color: rgba(255,107,53,.3);  background: rgba(255,107,53,.06); }
+.chip-lmc { color: var(--green);  border-color: rgba(0,230,118,.3);   background: rgba(0,230,118,.06); }
+.chip-k8s { color: var(--purple); border-color: rgba(179,136,255,.3); background: rgba(179,136,255,.06); }
+
+/* ── Tab bar ─────────────────────────────────────────── */
+nav {
+  display: flex;
+  padding: 0 32px;
+  background: rgba(10,14,22,.7);
+  border-bottom: 1px solid var(--border);
+  gap: 2px;
+  position: relative;
+}
+.tab-btn {
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  padding: 14px 20px;
+  background: none;
+  border: none;
+  color: var(--text3);
+  cursor: pointer;
+  position: relative;
+  transition: color .2s;
+  white-space: nowrap;
+}
+.tab-btn::after {
+  content: '';
+  position: absolute; bottom: -1px; left: 0; right: 0; height: 2px;
+  background: var(--orange);
+  transform: scaleX(0);
+  transition: transform .25s cubic-bezier(.4,0,.2,1);
+}
+.tab-btn:hover { color: var(--text2); }
+.tab-btn.active { color: var(--orange); }
+.tab-btn.active::after { transform: scaleX(1); }
+
+/* Progress bar */
+.prog-track {
+  position: absolute; bottom: -1px; left: 0; right: 0; height: 2px;
+  background: var(--border);
+  z-index: 0;
+}
+.prog-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--orange), var(--green), var(--purple));
+  width: 0%;
+  transition: width .1s linear;
+}
+
+/* ── Panels ──────────────────────────────────────────── */
+.panels { overflow: hidden; position: relative; }
+.panel {
+  display: none;
+  height: calc(100vh - 118px);
+  overflow-y: auto;
+  padding: 28px 32px 32px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--bg3) transparent;
+}
+.panel::-webkit-scrollbar { width: 4px; }
+.panel::-webkit-scrollbar-thumb { background: var(--bg3); border-radius: 2px; }
+.panel.active { display: block; }
+
+@keyframes panelIn {
+  from { opacity: 0; transform: translateY(14px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.panel.active { animation: panelIn .35s cubic-bezier(.4,0,.2,1) forwards; }
+
+/* ── Two-column layout ───────────────────────────────── */
+.two-col {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 24px;
+  align-items: start;
+}
+.col { display: flex; flex-direction: column; gap: 16px; }
+
+/* ── Section label ───────────────────────────────────── */
+.sec {
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: .16em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-bottom: 10px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.sec::after { content:''; flex:1; height:1px; background: var(--border); }
+
+/* ── Narration card ──────────────────────────────────── */
+.narr {
+  background: rgba(255,107,53,.04);
+  border: 1px solid rgba(255,107,53,.12);
+  border-left: 3px solid var(--orange);
+  border-radius: 0 var(--r-md) var(--r-md) 0;
+  padding: 16px 18px;
+}
+.narr-green {
+  background: rgba(0,230,118,.04);
+  border: 1px solid rgba(0,230,118,.12);
+  border-left: 3px solid var(--green);
+}
+.narr-purple {
+  background: rgba(179,136,255,.04);
+  border: 1px solid rgba(179,136,255,.12);
+  border-left: 3px solid var(--purple);
+}
+.narr-amber {
+  background: rgba(255,179,0,.04);
+  border: 1px solid rgba(255,179,0,.12);
+  border-left: 3px solid var(--amber);
+}
+.narr-label {
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+  color: var(--orange);
+  margin-bottom: 8px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.narr-label .dot {
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: var(--orange);
+  animation: pulse 2s ease-in-out infinite;
+}
+@keyframes pulse {
+  0%,100% { opacity: 1; transform: scale(1); }
+  50%      { opacity: .4; transform: scale(.7); }
+}
+.narr p { font-size: 13px; color: var(--text2); line-height: 1.8; }
+.narr p strong { color: var(--text1); font-weight: 500; }
+
+/* ── Code window ─────────────────────────────────────── */
+.code-win {
+  background: #07090f;
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  overflow: hidden;
+}
+.code-top {
+  background: #0d1018;
+  padding: 10px 16px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--border);
+}
+.code-dots { display: flex; gap: 6px; }
+.code-dots span { width: 10px; height: 10px; border-radius: 50%; }
+.cd-r { background: #ff5f57; }
+.cd-y { background: #ffbd2e; }
+.cd-g { background: #28c840; }
+.code-filename {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text3);
+  letter-spacing: .04em;
+}
+.code-body {
+  padding: 16px 20px;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.85;
+  overflow-x: auto;
+  white-space: pre;
+  max-height: 360px;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--bg3) transparent;
+}
+/* Syntax */
+.ck { color: #7eb6f6; }
+.cv { color: #b5c07a; }
+.cs { color: #f0a070; }
+.cc { color: #4a617a; font-style: italic; }
+.cm { color: #4ec9b0; font-weight: 600; }
+.cf { color: #79c0ff; }
+.ca { color: var(--amber); }
+.co { color: var(--orange); }
+.cg { color: var(--green); }
+.cp { color: var(--purple); }
+
+/* ── KV Table ────────────────────────────────────────── */
+.kv {
+  width: 100%;
+  border-collapse: collapse;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  overflow: hidden;
+  font-size: 12.5px;
+}
+.kv thead th {
+  padding: 10px 14px;
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  color: var(--text3);
+  background: var(--bg3);
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+}
+.kv tbody td {
+  padding: 11px 14px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+.kv tbody tr:last-child td { border-bottom: none; }
+.kv tbody tr:hover td { background: rgba(255,255,255,.025); }
+.kv td:first-child { font-family: var(--mono); font-size: 11.5px; color: var(--orange); width: 38%; }
+.kv td:last-child { color: var(--text2); line-height: 1.6; }
+.kv td code {
+  font-family: var(--mono);
+  font-size: 11px;
+  background: rgba(255,255,255,.06);
+  border-radius: 3px;
+  padding: 1px 5px;
+  color: var(--text1);
+}
+.kv-green td:first-child { color: var(--green); }
+.kv-purple td:first-child { color: var(--purple); }
+.kv-amber td:first-child { color: var(--amber); }
+
+/* ── Role cards ──────────────────────────────────────── */
+.role-grid {
+  display: grid;
+  grid-template-columns: repeat(3,1fr);
+  gap: 16px;
+  margin-top: 4px;
+}
+.role-card {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  overflow: hidden;
+  transition: border-color .2s, transform .2s;
+}
+.role-card:hover { border-color: var(--border-hi); transform: translateY(-3px); }
+.role-head {
+  padding: 14px 16px 12px;
+  font-size: 13px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-bottom: 1px solid var(--border);
+}
+.role-icon {
+  width: 28px; height: 28px;
+  border-radius: var(--r-sm);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 14px;
+  flex-shrink: 0;
+}
+.role-body { padding: 14px 16px; font-size: 12.5px; color: var(--text2); line-height: 1.7; }
+.role-body code {
+  font-family: var(--mono);
+  font-size: 11px;
+  background: rgba(255,255,255,.06);
+  border-radius: 3px;
+  padding: 1px 5px;
+  color: var(--text1);
+}
+.role-meta { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; }
+.tag {
+  font-family: var(--mono);
+  font-size: 10px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  border: 1px solid;
+}
+
+/* ── Flow diagram ────────────────────────────────────── */
+.flow-wrap { margin: 4px 0 20px; }
+.flow {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  overflow-x: auto;
+  padding-bottom: 8px;
+}
+.fn {
+  flex-shrink: 0;
+  min-width: 120px;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  padding: 12px 14px;
+  text-align: center;
+}
+.fn-title { font-size: 12px; font-weight: 600; margin-bottom: 3px; }
+.fn-sub { font-family: var(--mono); font-size: 10px; color: var(--text3); }
+.fa {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 0 8px;
+  gap: 3px;
+}
+.fa-line {
+  width: 40px; height: 1px;
+  background: linear-gradient(90deg, var(--border), var(--border-hi), var(--border));
+  position: relative;
+}
+.fa-line::after {
+  content: '';
+  position: absolute;
+  right: -4px; top: -3px;
+  border: 4px solid transparent;
+  border-left-color: var(--border-hi);
+}
+.fa-lbl { font-family: var(--mono); font-size: 9px; color: var(--text3); letter-spacing: .06em; }
+
+/* ── Tip box ─────────────────────────────────────────── */
+.tip {
+  border: 1px solid rgba(255,179,0,.2);
+  background: rgba(255,179,0,.04);
+  border-radius: var(--r-md);
+  padding: 12px 14px;
+  font-size: 12px;
+  color: var(--text2);
+  line-height: 1.7;
+}
+.tip strong { color: var(--amber); font-weight: 500; }
+.tip-green { border-color: rgba(0,230,118,.2); background: rgba(0,230,118,.04); }
+.tip-green strong { color: var(--green); }
+.tip-purple { border-color: rgba(179,136,255,.2); background: rgba(179,136,255,.04); }
+.tip-purple strong { color: var(--purple); }
+
+/* ── Stat bar ────────────────────────────────────────── */
+.stats {
+  display: grid;
+  grid-template-columns: repeat(4,1fr);
+  gap: 12px;
+  margin-bottom: 20px;
+}
+.stat {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  padding: 14px 16px;
+}
+.stat-num {
+  font-family: var(--mono);
+  font-size: 22px;
+  font-weight: 600;
+  line-height: 1;
+  margin-bottom: 4px;
+}
+.stat-lbl { font-size: 11px; color: var(--text3); }
+</style>
+</head>
+<body>
+
+<div class="bg"></div>
+<div class="bg-dots"></div>
+
+<div class="shell">
+
+  <!-- Header -->
+  <header>
+    <div class="header-left">
+      <span class="header-eyebrow">vLLM + LMCache  ·  P/D Disaggregation on Kubernetes</span>
+      <span class="header-title">Prefill / Decode Disaggregation — K8s Native</span>
+      <span class="header-sub">Llama-3.1-8B-Instruct  ·  vLLM OpenAI Server  ·  LMCache KV Transfer  ·  StormService CRD</span>
+    </div>
+    <div class="chips">
+      <span class="chip chip-vl">vLLM  ×2 pods</span>
+      <span class="chip chip-lmc">LMCache KV</span>
+      <span class="chip chip-k8s">Kubernetes</span>
+    </div>
+  </header>
+
+  <!-- Tab nav -->
+  <nav>
+    <div class="prog-track"><div class="prog-fill" id="prog"></div></div>
+    <button class="tab-btn active" data-tab="overview">01  Overview</button>
+    <button class="tab-btn" data-tab="router">02  Router</button>
+    <button class="tab-btn" data-tab="prefill">03  Prefill</button>
+    <button class="tab-btn" data-tab="decode">04  Decode</button>
+    <button class="tab-btn" data-tab="manifest">05  Manifest</button>
+  </nav>
+
+  <!-- Panels -->
+  <div class="panels">
+
+    <!-- ── OVERVIEW ─────────────────────────────────── -->
+    <div class="panel active" id="tab-overview">
+
+      <div class="stats">
+        <div class="stat"><div class="stat-num" style="color:var(--orange)">3</div><div class="stat-lbl">Total Pods</div></div>
+        <div class="stat"><div class="stat-num" style="color:var(--amber)">1</div><div class="stat-lbl">Prefill Pod  (GPU)</div></div>
+        <div class="stat"><div class="stat-num" style="color:var(--green)">1</div><div class="stat-lbl">Decode Pod  (GPU)</div></div>
+        <div class="stat"><div class="stat-num" style="color:var(--purple)">3</div><div class="stat-lbl">Roles  (Router · Prefill · Decode)</div></div>
+      </div>
+
+      <div class="narr" style="margin-bottom:20px">
+        <div class="narr-label"><span class="dot"></span>Architecture</div>
+        <p>This <strong>StormService</strong> achieves prefill-decode disaggregation using <strong>vLLM</strong> as the inference engine and <strong>LMCache</strong> as the KV transfer layer. The <strong>prefill pod</strong> runs vLLM in <code>kv_producer</code> mode — it processes the prompt, builds the full KV cache, and pushes it to the LMCache server. The <strong>decode pod</strong> runs vLLM in <code>kv_consumer</code> mode — it pulls that cached KV and streams tokens without ever re-running prefill. The <strong>router</strong> directs requests to the correct role via Kubernetes service discovery.</p>
+      </div>
+
+      <div class="sec">Request flow</div>
+      <div class="flow-wrap">
+        <div class="flow">
+          <div class="fn">
+            <div class="fn-title" style="color:var(--text2)">Client</div>
+            <div class="fn-sub">HTTP request</div>
+          </div>
+          <div class="fa"><div class="fa-line"></div><div class="fa-lbl">dispatch</div></div>
+          <div class="fn" style="border-color:rgba(255,179,0,.3)">
+            <div class="fn-title" style="color:var(--amber)">Router</div>
+            <div class="fn-sub">CPU  ·  random policy</div>
+          </div>
+          <div class="fa"><div class="fa-line"></div><div class="fa-lbl">route</div></div>
+          <div class="fn" style="border-color:rgba(255,107,53,.3)">
+            <div class="fn-title" style="color:var(--orange)">Prefill</div>
+            <div class="fn-sub">vLLM  ·  kv_producer</div>
+          </div>
+          <div class="fa">
+            <div class="fa-line" style="background:linear-gradient(90deg,rgba(179,136,255,.2),rgba(179,136,255,.8),rgba(179,136,255,.2))">
+              <div style="position:absolute;right:-4px;top:-3px;border:4px solid transparent;border-left-color:rgba(179,136,255,.7)"></div>
+            </div>
+            <div class="fa-lbl" style="color:var(--purple)">LMCache</div>
+          </div>
+          <div class="fn" style="border-color:rgba(0,230,118,.3)">
+            <div class="fn-title" style="color:var(--green)">Decode</div>
+            <div class="fn-sub">vLLM  ·  kv_consumer</div>
+          </div>
+          <div class="fa"><div class="fa-line"></div><div class="fa-lbl">stream</div></div>
+          <div class="fn">
+            <div class="fn-title" style="color:var(--text2)">Tokens</div>
+            <div class="fn-sub">generated response</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="sec">Roles</div>
+      <div class="role-grid">
+        <div class="role-card">
+          <div class="role-head">
+            <div class="role-icon" style="background:rgba(255,179,0,.1)">🚦</div>
+            <span style="color:var(--amber)">Router  (CPU)</span>
+          </div>
+          <div class="role-body">
+            Runs <code>sglang-router</code> with <code>--pd-disaggregation</code>. Polls port <code>30000</code> via K8s service discovery. Requires <code>sglang-router-sa</code> with LIST/WATCH on pods.
+            <div class="role-meta">
+              <span class="tag" style="color:var(--amber);border-color:rgba(255,179,0,.2)">1 replica</span>
+              <span class="tag" style="color:var(--text3);border-color:var(--border)">CPU only</span>
+              <span class="tag" style="color:var(--text3);border-color:var(--border)">stateful: true</span>
+            </div>
+          </div>
+        </div>
+        <div class="role-card">
+          <div class="role-head">
+            <div class="role-icon" style="background:rgba(255,107,53,.1)">⚡</div>
+            <span style="color:var(--orange)">Prefill  (kv_producer)</span>
+          </div>
+          <div class="role-body">
+            vLLM with <code>--kv-transfer-config</code> role set to <code>kv_producer</code>. Single GPU pod. Builds KV cache and pushes it to LMCache server. Never generates output tokens.
+            <div class="role-meta">
+              <span class="tag" style="color:var(--orange);border-color:rgba(255,107,53,.2)">1 replica</span>
+              <span class="tag" style="color:var(--orange);border-color:rgba(255,107,53,.2)">1 GPU</span>
+              <span class="tag" style="color:var(--text3);border-color:var(--border)">port 30000</span>
+            </div>
+          </div>
+        </div>
+        <div class="role-card">
+          <div class="role-head">
+            <div class="role-icon" style="background:rgba(0,230,118,.1)">🔄</div>
+            <span style="color:var(--green)">Decode  (kv_consumer)</span>
+          </div>
+          <div class="role-body">
+            vLLM with <code>--kv-transfer-config</code> role set to <code>kv_consumer</code>. Pulls pre-built KV from LMCache. Skips prefill entirely and streams tokens from the cached state.
+            <div class="role-meta">
+              <span class="tag" style="color:var(--green);border-color:rgba(0,230,118,.2)">1 replica</span>
+              <span class="tag" style="color:var(--green);border-color:rgba(0,230,118,.2)">1 GPU</span>
+              <span class="tag" style="color:var(--text3);border-color:var(--border)">port 30000</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── ROUTER ─────────────────────────────────────── -->
+    <div class="panel" id="tab-router">
+      <div class="two-col">
+        <div class="col">
+          <div class="narr">
+            <div class="narr-label"><span class="dot"></span>Routing Layer</div>
+            <p>The router runs on <strong>CPU only</strong> — no GPU required. It uses Kubernetes service discovery to maintain a live map of all prefill and decode pods. It selects worker pods by matching <strong>three labels</strong>: storm-service-name, role-name, and role-replica-index. This means it can precisely target a specific replica within a specific role regardless of pod IP changes.</p>
+          </div>
+
+          <div>
+            <div class="sec">Service discovery config</div>
+            <table class="kv">
+              <thead><tr><th>Flag</th><th>Value &amp; purpose</th></tr></thead>
+              <tbody>
+                <tr><td>--pd-disaggregation</td><td>Enables split prefill / decode routing mode</td></tr>
+                <tr><td>--policy random</td><td>Random selection across available workers</td></tr>
+                <tr><td>--service-discovery-port</td><td><code>30000</code> — all vLLM workers expose this port</td></tr>
+                <tr><td>--worker-startup-timeout</td><td><code>900s</code> — waits up to 15 min for workers to be ready</td></tr>
+                <tr><td>--service-discovery-namespace</td><td>Hardcoded to <code>default</code> — change if deploying elsewhere</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="tip">
+            <strong>ServiceAccount requirement:</strong> <code>sglang-router-sa</code> needs <code>pods/list</code> and <code>pods/watch</code> RBAC permissions in the target namespace for service discovery to function.
+          </div>
+        </div>
+
+        <div class="col">
+          <div class="code-win">
+            <div class="code-top">
+              <div class="code-dots"><span class="cd-r"></span><span class="cd-y"></span><span class="cd-g"></span></div>
+              <span class="code-filename">container: mini-lb  ·  launch command</span>
+            </div>
+            <div class="code-body"><span class="cc"># Image: aibrix/sglang-router:v0.1.7-patch.1-20250731</span>
+<span class="cf">python3</span> -m sglang_router.launch_router \
+  <span class="ck">--host</span>                        <span class="cs">0.0.0.0</span> \
+  <span class="ca">--pd-disaggregation</span> \
+  <span class="ck">--policy</span>                      <span class="cs">random</span> \
+  <span class="ca">--service-discovery</span> \
+  <span class="ck">--service-discovery-port</span>      <span class="cv">30000</span> \
+  <span class="ck">--worker-startup-timeout-secs</span> <span class="cv">900</span> \
+  <span class="ck">--prefill-selector</span> \
+    storm-service-name=<span class="cs">$STORM_SERVICE_NAME</span> \
+    role-name=<span class="cs">prefill</span> \
+    stormservice.orchestration.aibrix.ai/role-replica-index=<span class="cv">0</span> \
+  <span class="ck">--decode-selector</span> \
+    storm-service-name=<span class="cs">$STORM_SERVICE_NAME</span> \
+    role-name=<span class="cs">decode</span> \
+    stormservice.orchestration.aibrix.ai/role-replica-index=<span class="cv">0</span> \
+  <span class="ck">--service-discovery-namespace</span> <span class="cs">default</span>
+
+<span class="cc"># NOTE: Change --service-discovery-namespace if</span>
+<span class="cc"># deploying outside the 'default' namespace.</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── PREFILL ─────────────────────────────────────── -->
+    <div class="panel" id="tab-prefill">
+      <div class="two-col">
+        <div class="col">
+          <div class="narr">
+            <div class="narr-label"><span class="dot" style="background:var(--orange)"></span>Prefill Engine</div>
+            <p>The prefill pod runs <strong>vLLM in <code>kv_producer</code> mode</strong>. It ingests the full prompt, runs the model forward pass to build the attention KV cache, and immediately pushes those KV tensors to the <strong>LMCache server</strong> via gRPC. It never generates a single output token — its only responsibility is prompt processing and KV population. The <code>LMCACHE_USE_EXPERIMENTAL=True</code> env var is mandatory or the connector is silently skipped.</p>
+          </div>
+
+          <div>
+            <div class="sec">vLLM KV transfer config — prefill</div>
+            <table class="kv">
+              <thead><tr><th>Parameter</th><th>Value &amp; purpose</th></tr></thead>
+              <tbody>
+                <tr><td>kv_connector</td><td><code>LMCacheConnectorV2</code> — plugs into vLLM's attention transfer hook</td></tr>
+                <tr><td>kv_role</td><td><code>kv_producer</code> — builds KV cache and pushes to LMCache</td></tr>
+                <tr><td>lmcache_rpc_port</td><td><code>lmcache-server:8400</code> — gRPC address of the LMCache K8s service</td></tr>
+                <tr><td>kv_buffer_device</td><td><code>cuda</code> — KV stays on GPU, avoids PCIe round-trip to CPU</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div>
+            <div class="sec">Required env vars</div>
+            <table class="kv">
+              <thead><tr><th>Variable</th><th>Effect</th></tr></thead>
+              <tbody>
+                <tr><td>LMCACHE_USE_EXPERIMENTAL</td><td><code>True</code> — activates LMCacheConnectorV2 plugin in vLLM</td></tr>
+                <tr><td>CUDA_VISIBLE_DEVICES</td><td><code>0</code> — pin this pod to its assigned GPU</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="tip">
+            <strong>Model path:</strong> Loaded from hostPath <code>/data01/models</code> → <code>/models</code> (readOnly). Model must be pre-staged on every schedulable node. Use a PVC in production to avoid silent failures on rescheduling.
+          </div>
+        </div>
+
+        <div class="col">
+          <div class="code-win">
+            <div class="code-top">
+              <div class="code-dots"><span class="cd-r"></span><span class="cd-y"></span><span class="cd-g"></span></div>
+              <span class="code-filename">container: prefill  ·  vllm launch</span>
+            </div>
+            <div class="code-body"><span class="cc"># Image: vllm/vllm-openai:latest</span>
+<span class="cc"># Resources: nvidia.com/gpu: 1</span>
+<span class="cc"># Env: LMCACHE_USE_EXPERIMENTAL=True</span>
+
+<span class="cf">python3</span> -m vllm.entrypoints.openai.api_server \
+  <span class="ck">--model</span>                  <span class="cs">/models/Llama-3.1-8B-Instruct</span> \
+  <span class="ck">--served-model-name</span>      <span class="cs">Llama-3.1-8B-Instruct</span> \
+  <span class="ck">--host</span>                   <span class="cs">0.0.0.0</span> \
+  <span class="ck">--port</span>                   <span class="cv">30000</span> \
+  <span class="ck">--gpu-memory-utilization</span> <span class="cv">0.8</span> \
+  <span class="ck">--dtype</span>                  <span class="cs">bfloat16</span> \
+  <span class="ck">--max-model-len</span>          <span class="cv">8192</span> \
+  <span class="ck">--trust-remote-code</span> \
+  <span class="ca">--kv-transfer-config</span> <span class="cs">'{</span>
+<span class="cs">    "kv_connector": "LMCacheConnectorV2",</span>
+<span class="cs">    "kv_role":      "kv_producer",</span>
+<span class="cs">    "kv_connector_extra_config": {</span>
+<span class="co">      "lmcache_rpc_port": "lmcache-server:8400"</span><span class="cs">,</span>
+<span class="cs">      "kv_buffer_device": "cuda"</span>
+<span class="cs">    }</span>
+<span class="cs">  }'</span>
+
+<span class="cc"># Volumes:</span>
+<span class="cc">#   model-vol → hostPath /data01/models  (readOnly)</span>
+<span class="cc">#   shared-mem → emptyDir Memory (/dev/shm)</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── DECODE ──────────────────────────────────────── -->
+    <div class="panel" id="tab-decode">
+      <div class="two-col">
+        <div class="col">
+          <div class="narr narr-green">
+            <div class="narr-label" style="color:var(--green)"><span class="dot" style="background:var(--green)"></span>Decode Engine</div>
+            <p>The decode pod runs <strong>vLLM in <code>kv_consumer</code> mode</strong>. On receiving a request, it queries LMCache for a pre-built KV matching the prompt hash. If found, it loads those tensors directly into GPU memory and begins autoregressive token generation — <strong>the prefill computation is entirely skipped</strong>. This dramatically reduces time-to-first-token and frees the decode GPU for pure generation throughput.</p>
+          </div>
+
+          <div>
+            <div class="sec">vLLM KV transfer config — decode</div>
+            <table class="kv kv-green">
+              <thead><tr><th>Parameter</th><th>Value &amp; purpose</th></tr></thead>
+              <tbody>
+                <tr><td>kv_connector</td><td><code>LMCacheConnectorV2</code> — same plugin, consumer side</td></tr>
+                <tr><td>kv_role</td><td><code>kv_consumer</code> — pulls KV from LMCache, skips prefill pass</td></tr>
+                <tr><td>lmcache_rpc_port</td><td><code>lmcache-server:8400</code> — same LMCache K8s service endpoint</td></tr>
+                <tr><td>kv_buffer_device</td><td><code>cuda</code> — KV loaded directly into decode GPU memory</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div>
+            <div class="sec">Startup dependency</div>
+            <table class="kv kv-green">
+              <thead><tr><th>Order</th><th>Service &amp; condition</th></tr></thead>
+              <tbody>
+                <tr><td>① First</td><td><code>lmcache-server</code> pod must be Ready — decode init will fail otherwise</td></tr>
+                <tr><td>② Second</td><td><code>prefill</code> pod up — router won't route until both workers are reachable</td></tr>
+                <tr><td>③ Third</td><td><code>decode</code> pod starts — connects to LMCache on init, then signals Ready</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="tip tip-green">
+            <strong>KV cache hit guarantee:</strong> Prefill and decode must receive the <em>identical</em> tokenised prompt. Any mismatch in text or tokeniser config causes a cache miss — the decode node falls back to running prefill itself, negating the disaggregation benefit entirely.
+          </div>
+        </div>
+
+        <div class="col">
+          <div class="code-win">
+            <div class="code-top">
+              <div class="code-dots"><span class="cd-r"></span><span class="cd-y"></span><span class="cd-g"></span></div>
+              <span class="code-filename">container: decode  ·  vllm launch</span>
+            </div>
+            <div class="code-body"><span class="cc"># Image: vllm/vllm-openai:latest</span>
+<span class="cc"># Resources: nvidia.com/gpu: 1</span>
+<span class="cc"># Env: LMCACHE_USE_EXPERIMENTAL=True</span>
+
+<span class="cf">python3</span> -m vllm.entrypoints.openai.api_server \
+  <span class="ck">--model</span>                  <span class="cs">/models/Llama-3.1-8B-Instruct</span> \
+  <span class="ck">--served-model-name</span>      <span class="cs">Llama-3.1-8B-Instruct</span> \
+  <span class="ck">--host</span>                   <span class="cs">0.0.0.0</span> \
+  <span class="ck">--port</span>                   <span class="cv">30000</span> \
+  <span class="ck">--gpu-memory-utilization</span> <span class="cv">0.8</span> \
+  <span class="ck">--dtype</span>                  <span class="cs">bfloat16</span> \
+  <span class="ck">--max-model-len</span>          <span class="cv">8192</span> \
+  <span class="ck">--trust-remote-code</span> \
+  <span class="ca">--kv-transfer-config</span> <span class="cs">'{</span>
+<span class="cs">    "kv_connector": "LMCacheConnectorV2",</span>
+<span class="cs">    "kv_role":      "kv_consumer",</span>
+<span class="cs">    "kv_connector_extra_config": {</span>
+<span class="cg">      "lmcache_rpc_port": "lmcache-server:8400"</span><span class="cs">,</span>
+<span class="cs">      "kv_buffer_device": "cuda"</span>
+<span class="cs">    }</span>
+<span class="cs">  }'</span>
+
+<span class="cc"># Volumes:</span>
+<span class="cc">#   model-vol → hostPath /data01/models  (readOnly)</span>
+<span class="cc">#   shared-mem → emptyDir Memory (/dev/shm)</span></div>
+          </div>
+
+          <div class="code-win">
+            <div class="code-top">
+              <div class="code-dots"><span class="cd-r"></span><span class="cd-y"></span><span class="cd-g"></span></div>
+              <span class="code-filename">lmcache-server  ·  sidecar launch</span>
+            </div>
+            <div class="code-body"><span class="cc"># LMCache server — separate pod / sidecar</span>
+<span class="cc"># Image: lmcache/lmcache-server:latest</span>
+<span class="cc"># No GPU needed — CPU pod only</span>
+
+<span class="cf">lmcache_server</span> <span class="cs">0.0.0.0</span> <span class="cv">8400</span>
+
+<span class="cc"># K8s Service exposes it as:</span>
+<span class="cc">#   lmcache-server.default.svc.cluster.local:8400</span>
+<span class="cc">#</span>
+<span class="cc"># Both prefill and decode pods reference this DNS</span>
+<span class="cc"># name in their --kv-transfer-config lmcache_rpc_port</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── MANIFEST ───────────────────────────────────── -->
+    <div class="panel" id="tab-manifest">
+      <div class="two-col">
+        <div class="col">
+          <div class="narr narr-purple">
+            <div class="narr-label" style="color:var(--purple)"><span class="dot" style="background:var(--purple)"></span>StormService CRD</div>
+            <p>The <strong>StormService</strong> custom resource packages the entire vLLM P/D stack — router, prefill, decode, and LMCache server — into a single deployable object. Setting <code>stateful: true</code> at both service and role level guarantees stable pod DNS names needed for reliable service discovery. The LMCache server role carries no GPU resource request, keeping it on CPU nodes only.</p>
+          </div>
+
+          <div>
+            <div class="sec">Role topology</div>
+            <table class="kv kv-purple">
+              <thead><tr><th>Role</th><th>Replicas</th><th>GPU</th><th>Key config</th></tr></thead>
+              <tbody>
+                <tr><td>routing</td><td>1</td><td>0 (CPU)</td><td>serviceAccount, pd-disaggregation</td></tr>
+                <tr><td>lmcache</td><td>1</td><td>0 (CPU)</td><td>port 8400, KV store service</td></tr>
+                <tr><td>prefill</td><td>1</td><td>1×GPU</td><td>kv_producer, LMCacheConnectorV2</td></tr>
+                <tr><td>decode</td><td>1</td><td>1×GPU</td><td>kv_consumer, LMCacheConnectorV2</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div>
+            <div class="sec">Shared volumes (prefill + decode)</div>
+            <table class="kv kv-purple">
+              <thead><tr><th>Volume</th><th>Mount</th><th>Note</th></tr></thead>
+              <tbody>
+                <tr><td>model-vol</td><td><code>/models</code> (readOnly)</td><td>hostPath <code>/data01/models</code> — must be pre-staged on node</td></tr>
+                <tr><td>shared-mem</td><td><code>/dev/shm</code></td><td>emptyDir Memory — shared memory for GPU ops</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="tip tip-purple">
+            <strong>LMCache K8s Service:</strong> The <code>lmcache</code> role needs a headless K8s Service so prefill and decode pods can resolve <code>lmcache-server.default.svc.cluster.local:8400</code> at init time. Without this DNS entry the connectors fail to connect and both vLLM pods will crash-loop.
+          </div>
+        </div>
+
+        <div class="col">
+          <div class="code-win">
+            <div class="code-top">
+              <div class="code-dots"><span class="cd-r"></span><span class="cd-y"></span><span class="cd-g"></span></div>
+              <span class="code-filename">vllm-lmcache-pd.yaml  ·  skeleton</span>
+            </div>
+            <div class="code-body"><span class="ck">apiVersion</span>: <span class="cm">orchestration.aibrix.ai/v1alpha1</span>
+<span class="ck">kind</span>:       <span class="cm">StormService</span>
+<span class="ck">metadata</span>:
+  <span class="ck">name</span>: <span class="cs">vllm-lmcache-pd</span>
+<span class="ck">spec</span>:
+  <span class="ck">replicas</span>:       <span class="cv">1</span>
+  <span class="ck">updateStrategy</span>:
+    <span class="ck">type</span>: <span class="cs">InPlaceUpdate</span>   <span class="cc"># no pod restart on config update</span>
+  <span class="ck">stateful</span>:       <span class="cv">true</span>     <span class="cc"># stable pod DNS names</span>
+
+  <span class="ck">roles</span>:
+
+  <span class="cc">  # ── Role 1: Router (CPU) ───────────────────────</span>
+  - <span class="ck">name</span>:      <span class="cs">routing</span>
+    <span class="ck">replicas</span>: <span class="cv">1</span>
+    <span class="ck">stateful</span>: <span class="cv">true</span>
+    <span class="cc">    # serviceAccountName: sglang-router-sa</span>
+    <span class="cc">    # image: aibrix/sglang-router:v0.1.7-patch.1-20250731</span>
+    <span class="cc">    # --pd-disaggregation --policy random</span>
+
+  <span class="cc">  # ── Role 2: LMCache Server (CPU) ───────────────</span>
+  - <span class="ck">name</span>:      <span class="cs">lmcache</span>
+    <span class="ck">replicas</span>: <span class="cv">1</span>
+    <span class="ck">stateful</span>: <span class="cv">true</span>
+    <span class="cc">    # image: lmcache/lmcache-server:latest</span>
+    <span class="cc">    # command: lmcache_server 0.0.0.0 8400</span>
+    <span class="cc">    # No GPU — CPU only</span>
+
+  <span class="cc">  # ── Role 3: Prefill (1 GPU, kv_producer) ───────</span>
+  - <span class="ck">name</span>:      <span class="cs">prefill</span>
+    <span class="ck">replicas</span>: <span class="cv">1</span>
+    <span class="ck">stateful</span>: <span class="cv">true</span>
+    <span class="cc">    # image: vllm/vllm-openai:latest</span>
+    <span class="cc">    # nvidia.com/gpu: 1</span>
+    <span class="cc">    # LMCACHE_USE_EXPERIMENTAL: "True"</span>
+    <span class="cc">    # --kv-transfer-config kv_role=kv_producer</span>
+    <span class="cc">    # lmcache_rpc_port: lmcache-server:8400</span>
+
+  <span class="cc">  # ── Role 4: Decode (1 GPU, kv_consumer) ────────</span>
+  - <span class="ck">name</span>:      <span class="cs">decode</span>
+    <span class="ck">replicas</span>: <span class="cv">1</span>
+    <span class="ck">stateful</span>: <span class="cv">true</span>
+    <span class="cc">    # image: vllm/vllm-openai:latest</span>
+    <span class="cc">    # nvidia.com/gpu: 1</span>
+    <span class="cc">    # LMCACHE_USE_EXPERIMENTAL: "True"</span>
+    <span class="cc">    # --kv-transfer-config kv_role=kv_consumer</span>
+    <span class="cc">    # lmcache_rpc_port: lmcache-server:8400</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div><!-- /panels -->
+</div><!-- /shell -->
+
+<script>
+const tabs = document.querySelectorAll('.tab-btn');
+const prog = document.getElementById('prog');
+const DURATION = 12000;
+let cur = 0, t0 = Date.now(), raf;
+
+function switchTab(i) {
+  cur = i;
+  tabs.forEach((b,j) => b.classList.toggle('active', j===i));
+  document.querySelectorAll('.panel').forEach((p,j) => {
+    p.classList.remove('active');
+    if(j===i){ void p.offsetWidth; p.classList.add('active'); }
+  });
+  t0 = Date.now();
+}
+
+function tick() {
+  const elapsed = Date.now() - t0;
+  const pct = Math.min(elapsed / DURATION * 100, 100);
+  prog.style.width = pct + '%';
+  if(elapsed >= DURATION) switchTab((cur+1) % tabs.length);
+  raf = requestAnimationFrame(tick);
+}
+
+tabs.forEach((b,i) => b.addEventListener('click', () => switchTab(i)));
+
+document.addEventListener('keydown', e => {
+  if(e.key === 'ArrowRight') switchTab((cur+1) % tabs.length);
+  if(e.key === 'ArrowLeft')  switchTab((cur-1+tabs.length) % tabs.length);
+});
+
+requestAnimationFrame(tick);
+</script>
+</body>
+</html>

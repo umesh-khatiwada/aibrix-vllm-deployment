@@ -1,0 +1,15 @@
+apiVersion: aigateway.envoyproxy.io/v1alpha1
+kind: AIServiceBackend
+metadata:
+  name: deepseek-r1-distill-llama-8b
+  namespace: aibrix-system
+spec:
+  schema:
+    name: OpenAI
+    version: v1
+    prefix: /v1
+  backendRef:
+    name: deepseek-r1-distill-llama-8b-backend
+    namespace: aibrix-system
+    kind: Backend
+    group: gateway.envoyproxy.io

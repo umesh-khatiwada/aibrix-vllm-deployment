@@ -1,0 +1,153 @@
+kind: Deployment
+metadata:
+  labels:
+    model.aibrix.ai/name: deepseek-r1-distill-llama-8b
+    model.aibrix.ai/port: "8000"
+    adapter.model.aibrix.ai/enabled: "true"
+  name: deepseek-r1-distill-llama-8b
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      model.aibrix.ai/name: deepseek-r1-distill-llama-8b
+      model.aibrix.ai/port: "8000"
+  template:
+    metadata:
+      labels:
+        model.aibrix.ai/name: deepseek-r1-distill-llama-8b
+        model.aibrix.ai/port: "8000"
+        adapter.model.aibrix.ai/enabled: "true"
+    spec:
+      containers:
+        - command:
+            - python3
+            - -m
+            - vllm.entrypoints.openai.api_server
+            - --host
+            - "0.0.0.0"
+            - --port
+            - "8000"
+            - --uvicorn-log-level
+            - warning
+            - --model
+            - deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+            - --served-model-name
+            # Note: The `--served-model-name` argument value must also match the Service name and the Deployment label `model.aibrix.ai/name`
+            - deepseek-r1-distill-llama-8b
+            - --max-model-len
+            - "12288"
+            - --enable-lora
+          image: rocm/vllm:latest
+          imagePullPolicy: IfNotPresent
+          name: vllm-openai
+          ports:
+            - containerPort: 8000
+              protocol: TCP
+          resources:
+            limits:
+              amd.com/gpu: "1"
+            requests:
+              amd.com/gpu: "1"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+              scheme: HTTP
+            failureThreshold: 3
+            periodSeconds: 5
+            successThreshold: 1
+            timeoutSeconds: 1
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+              scheme: HTTP
+            failureThreshold: 5
+            periodSeconds: 5
+            successThreshold: 1
+            timeoutSeconds: 1
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8000
+              scheme: HTTP
+            failureThreshold: 30
+            periodSeconds: 5
+            successThreshold: 1
+            timeoutSeconds: 1
+          volumeMounts:
+          - mountPath: /root/.cache/huggingface
+            name: hf-cache
+          - mountPath: /tmp/aibrix/adapters
+            name: adapter-storage
+        - name: aibrix-runtime
+          image: aibrix/runtime:v0.5.0
+          command:
+            - aibrix_runtime
+            - --port
+            - "8080"
+          env:
+            - name: INFERENCE_ENGINE
+              value: vllm
+            - name: INFERENCE_ENGINE_ENDPOINT
+              value: http://localhost:8000
+          ports:
+            - containerPort: 8080
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 2
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          volumeMounts:
+          - mountPath: /root/.cache/huggingface
+            name: hf-cache
+          - mountPath: /tmp/aibrix/adapters
+            name: adapter-storage
+      volumes:
+      - name: hf-cache
+        persistentVolumeClaim:
+          claimName: hf-cache-pvc
+      - name: adapter-storage
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: deepseek-r1-distill-llama-8b
+  namespace: default
+  labels:
+    model.aibrix.ai/name: deepseek-r1-distill-llama-8b
+    prometheus-discovery: "true"
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "8080"
+spec:
+  selector:
+      model.aibrix.ai/name: deepseek-r1-distill-llama-8b
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+  type: ClusterIP
+---
+ apiVersion: v1
+ kind: PersistentVolumeClaim
+ metadata:
+   name: hf-cache-pvc
+   namespace: default
+ spec:
+   accessModes:
+   - ReadWriteMany
+   resources:
+     requests:
+       storage: 200Gi
+   storageClassName: multinode

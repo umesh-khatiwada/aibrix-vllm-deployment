@@ -1,0 +1,23 @@
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: SecurityPolicy
+metadata:
+  name: auth0-jwt-auth
+  namespace: envoy-gateway-system
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: aibrix-ai-gateway
+  jwt:
+    providers:
+      - name: auth0
+        issuer: https://dev-xxx.us.auth0.com/
+        audiences:
+          - https://dev-xxx.us.auth0.com/api/v2/
+        remoteJWKS:
+          uri: https://dev-xxx.us.auth0.com/.well-known/jwks.json
+        claimToHeaders:
+          - claim: sub
+            header: x-user-id
+          - claim: permissions
+            header: x-user-permissions

@@ -1,0 +1,462 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AIBrix StormService — P/D Disaggregation</title>
+  <style>
+    /* Fullscreen base & Core Variables */
+    *{box-sizing:border-box;margin:0;padding:0}
+    :root{
+      --color-bg-primary: #0b0c10;
+      --color-bg-secondary: #12151e;
+      --color-bg-tertiary: #1b1f2e;
+      
+      --color-text-primary: #f8fafc;
+      --color-text-secondary: #cbd5e1;
+      --color-text-tertiary: #8b9cba;
+      --color-text-info: #45f3ff;
+      --color-text-success: #00ffaa;
+      --color-text-warning: #ffcc00;
+      
+      --color-border-secondary: #2a3143;
+      --color-border-tertiary: #4a5568;
+      
+      --border-radius-md: 0.5rem;
+      --border-radius-lg: 0.75rem;
+      
+      --font-sans: -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Oxygen,Ubuntu,Cantarell,sans-serif;
+      --font-mono: "SF Mono","Monaco","Inconsolata","Fira Code",monospace;
+    }
+    
+    body{font-family:var(--font-sans);background:var(--color-bg-primary);color:var(--color-text-primary);line-height:1.6;overflow:hidden; height: 100vh; width: 100vw;}
+    
+    /* Background animated grid */
+    .bg-grid {
+      position: absolute; top: 0; left: 0; width: 100vw; height: 100vh; z-index: 0;
+      background-size: 40px 40px;
+      background-image: linear-gradient(to right, rgba(255, 255, 255, 0.02) 1px, transparent 1px),
+                        linear-gradient(to bottom, rgba(255, 255, 255, 0.02) 1px, transparent 1px);
+      animation: panGrid 20s linear infinite;
+    }
+    @keyframes panGrid { 0% { background-position: 0 0; } 100% { background-position: 40px 40px; } }
+
+    /* Fullscreen container */
+    .shell{position:fixed;top:0;left:0;width:100vw;height:100vh;background:radial-gradient(circle at top right, var(--color-bg-secondary), var(--color-bg-primary));overflow:hidden;display:flex;flex-direction:column; z-index: 1;}
+    .content{flex:1;overflow:hidden;display:flex;flex-direction:column; position:relative; z-index: 2; max-width: 1600px; margin: 0 auto; width: 100%;}
+    
+    /* Top header */
+    .top{padding:1.5rem 2.5rem 1rem;background:rgba(18, 21, 30, 0.8);backdrop-filter:blur(12px);border-bottom:1px solid var(--color-border-secondary);display:flex;align-items:flex-start;justify-content:space-between;gap:1.5rem;flex-wrap:wrap; position: relative; z-index: 10;}
+    .top-title{font-size:1.6rem;font-weight:800;background:linear-gradient(135deg,#ffffff,#a3b1c6);background-clip:text;-webkit-background-clip:text;-webkit-text-fill-color:transparent;line-height:1.2;letter-spacing:-0.5px;}
+    .top-sub{font-size:0.95rem;color:var(--color-text-tertiary);margin-top:0.35rem; font-weight: 500;}
+    
+    /* Badges */
+    .badges{display:flex;gap:0.75rem;flex-wrap:wrap; margin-top: 0.5rem;}
+    .badge{display:inline-flex;align-items:center;font-size:0.75rem;font-weight:700;padding:0.4rem 1rem;border-radius:9999px;gap:0.35rem;backdrop-filter:blur(10px);border:1px solid rgba(255,255,255,0.1); transition: transform 0.3s ease;}
+    .badge:hover { transform: translateY(-2px); }
+    .b-amd{background:linear-gradient(135deg,rgba(26,15,46,0.8),rgba(42,26,78,0.8));color:#d4b3ff;border-color:#6e56cf;box-shadow:0 0 15px rgba(110,86,207,0.4)}
+    .b-blue{background:linear-gradient(135deg,rgba(14,79,94,0.8),rgba(10,90,138,0.8));color:var(--color-text-info);border-color:#1e88e5;box-shadow:0 0 15px rgba(30,136,229,0.3)}
+    .b-green{background:linear-gradient(135deg,rgba(26,60,52,0.8),rgba(15,81,50,0.8));color:var(--color-text-success);border-color:#2e7d32;box-shadow:0 0 15px rgba(46,125,50,0.3)}
+    
+    /* Autoplay Progress */
+    .progress-bar-container { height: 4px; background: rgba(255,255,255,0.05); width: 100%; position: absolute; top: 0; left: 0; z-index: 20;}
+    .progress-bar { height: 100%; width: 0%; background: linear-gradient(90deg, #45f3ff, #bc8cff); transition: width 0.1s linear; box-shadow: 0 0 10px #45f3ff; }
+
+    /* Tabs */
+    .tabs{padding:0 2.5rem;background:rgba(18, 21, 30, 0.6);display:flex;gap:0;overflow-x:auto;scrollbar-width:none;-ms-overflow-style:none; position:relative; z-index:9; border-bottom: 1px solid var(--color-border-secondary);}
+    .tabs::-webkit-scrollbar{display:none}
+    .tab{flex:1 0 auto;font-size:0.875rem;font-weight:600;padding:1.25rem 1.5rem;border:none;background:none;color:var(--color-text-tertiary);cursor:pointer;position:relative;white-space:nowrap;transition:all 0.3s ease; border-bottom: 2px solid transparent; text-transform: uppercase; letter-spacing: 0.05em;}
+    .tab:hover{color:var(--color-text-primary);background:rgba(255,255,255,0.03)}
+    .tab.active{color:var(--color-text-info);background:linear-gradient(180deg,rgba(69,243,255,0.05),transparent);border-bottom-color:var(--color-text-info); text-shadow: 0 0 10px rgba(69,243,255,0.5);}
+    
+    /* Panels with Staggered Entrance */
+    .panel{display:none;padding:2.5rem;flex:1;overflow-y:auto; height: calc(100vh - 160px);}
+    .panel.active{display:block;}
+    
+    @keyframes slideUpFade { from { opacity: 0; transform: translateY(20px); filter:blur(4px); } to { opacity: 1; transform: translateY(0); filter:blur(0); } }
+    .panel.active .animate-1 { animation: slideUpFade 0.6s cubic-bezier(0.16, 1, 0.3, 1) forwards 0.1s; opacity: 0; }
+    .panel.active .animate-2 { animation: slideUpFade 0.6s cubic-bezier(0.16, 1, 0.3, 1) forwards 0.2s; opacity: 0; }
+    .panel.active .animate-3 { animation: slideUpFade 0.6s cubic-bezier(0.16, 1, 0.3, 1) forwards 0.3s; opacity: 0; }
+
+    /* --- NEW STRUCTURE: 2-Column Layout --- */
+    .split-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 2.5rem; align-items: stretch; height: 100%;}
+    .col-left { display: flex; flex-direction: column; gap: 1.5rem; }
+    .col-right { display: flex; flex-direction: column; height: 100%; overflow: hidden;}
+
+    /* Narration block */
+    .narr{background:linear-gradient(135deg,rgba(14,79,94,0.2),rgba(14,79,94,0.05));border-left:4px solid var(--color-text-info);border-radius:0 var(--border-radius-md) var(--border-radius-md) 0;padding:1.5rem;backdrop-filter:blur(10px); position:relative; overflow:hidden;}
+    .narr::after { content: ''; position: absolute; top: -50%; left: -50%; width: 200%; height: 200%; background: radial-gradient(circle, rgba(69,243,255,0.05) 0%, transparent 70%); animation: rotateGlow 10s linear infinite; pointer-events:none; }
+    @keyframes rotateGlow { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+    .narr-lbl{font-size:0.75rem;font-weight:800;letter-spacing:0.15em;text-transform:uppercase;color:var(--color-text-info);margin-bottom:0.75rem; display:flex; align-items:center; gap:0.5rem;}
+    .narr-lbl::before { content: '●'; animation: blink 2s infinite; }
+    @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+    .narr p{font-size:1rem;color:var(--color-text-primary);line-height:1.8;margin:0; text-shadow: 0 2px 4px rgba(0,0,0,0.5);}
+
+    /* Tables */
+    .kv{width:100%;font-size:0.85rem;border-collapse:collapse;background:rgba(27, 31, 46, 0.5);border-radius:var(--border-radius-md);overflow:hidden;box-shadow:0 4px 20px rgba(0,0,0,0.2); border: 1px solid var(--color-border-secondary);}
+    .kv td{padding:1.25rem;border-bottom:1px solid var(--color-border-secondary);vertical-align:top}
+    .kv td:first-child{color:var(--color-text-info);width:35%;font-family:var(--font-mono);font-weight:600}
+    .kv td:last-child{color:var(--color-text-secondary)}
+    .kv tr:last-child td{border-bottom:none}
+    .kv tr:hover td{background:rgba(255,255,255,0.03); color: white;}
+
+    /* Code Window (Anti-Spaghetti) */
+    .code-window { background: #0d1117; border: 1px solid var(--color-border-secondary); border-radius: var(--border-radius-lg); overflow: hidden; display: flex; flex-direction: column; flex: 1; box-shadow:0 10px 30px rgba(0,0,0,0.4);}
+    .code-header { background: #161b22; padding: 0.75rem 1rem; font-size: 0.75rem; font-family: var(--font-mono); color: var(--color-text-tertiary); border-bottom: 1px solid var(--color-border-secondary); display: flex; gap: 0.5rem; align-items: center;}
+    .code-dots { display: flex; gap: 6px; }
+    .code-dots div { width: 10px; height: 10px; border-radius: 50%; background: var(--color-border-secondary); }
+    .code-body { padding: 1.5rem; overflow-y: auto; font-family: var(--font-mono); font-size: 0.85rem; line-height: 1.6; color: #c9d1d9; flex: 1;}
+    
+    /* Syntax Highlighting */
+    .y-key{color:#9cdcfe} .y-val{color:#b5cea8} .y-str{color:#ce9178} .y-comment{color:#6a9955; font-style:italic;} .y-kind{color:#4ec9b0} .y-cmd{color: #79c0ff;}
+
+    /* Utilities */
+    .section-lbl{font-size:0.8rem;font-weight:800;letter-spacing:0.15em;text-transform:uppercase;color:var(--color-text-secondary);margin:1rem 0;display:flex;align-items:center;gap:0.75rem;}
+    .section-lbl::after { content:''; flex:1; height:1px; background: linear-gradient(90deg, var(--color-border-tertiary), transparent); }
+
+    /* Data Flow Animations (Overview Slide) */
+    .flow{display:flex;align-items:center;justify-content:space-between;gap:0;margin:2rem 0;flex-wrap:nowrap;}
+    .flow-node{flex: 1; border-radius:var(--border-radius-lg);padding:1.25rem;font-size:0.9rem;font-weight:700;text-align:center;box-shadow:0 8px 25px rgba(0,0,0,0.4);position:relative; border: 1px solid rgba(255,255,255,0.1); z-index:2; background: var(--color-bg-secondary);}
+    
+    .node-pulse { animation: nodeGlow 3s infinite alternate; }
+    @keyframes nodeGlow { 0% { box-shadow: 0 0 10px rgba(69,243,255,0.1); border-color: rgba(69,243,255,0.2); } 100% { box-shadow: 0 0 30px rgba(69,243,255,0.4); border-color: rgba(69,243,255,0.6); } }
+
+    .flow-arrow{font-size:1.5rem;color:var(--color-text-tertiary);padding:0 1rem;font-weight:300; position:relative; display:flex; flex-direction:column; align-items:center; min-width: 100px;}
+    .flow-arrow::before { content: '→'; background: linear-gradient(90deg, transparent, var(--color-text-info), transparent); background-clip: text; -webkit-background-clip: text; color: rgba(255,255,255,0.1); animation: dataStream 1.5s infinite linear;}
+    @keyframes dataStream { 0% { background-position: -20px 0; opacity:0;} 50% {opacity:1;} 100% { background-position: 20px 0; opacity:0;} }
+    .flow-label{font-size:0.7rem;color:var(--color-text-secondary);text-align:center;margin-top:0.75rem; font-family:var(--font-mono); letter-spacing:0.05em; background:rgba(0,0,0,0.3); padding:4px 8px; border-radius:4px;}
+    
+    /* Role cards (Overview Slide) */
+    .roles{display:grid;grid-template-columns:repeat(3, 1fr);gap:1.5rem;}
+    .role-card{background:rgba(27, 31, 46, 0.7);border:1px solid var(--color-border-secondary);border-radius:var(--border-radius-lg);overflow:hidden;backdrop-filter:blur(20px);transition:all 0.4s cubic-bezier(0.16, 1, 0.3, 1);box-shadow:0 8px 32px rgba(0,0,0,0.3); position: relative;}
+    .role-card::before { content: ''; position: absolute; top: 0; left: 0; width: 100%; height: 2px; background: transparent; transition: background 0.4s; }
+    .role-card:hover{transform:translateY(-8px);box-shadow:0 20px 40px rgba(0,0,0,0.6); border-color: rgba(255,255,255,0.2);}
+    .role-card:hover::before { background: var(--color-text-info); }
+    .role-head{padding:1.25rem 1.5rem;font-size:0.9rem;font-weight:700;display:flex;align-items:center;gap:0.75rem; border-bottom: 1px solid rgba(255,255,255,0.05);}
+    .role-body{padding:1.5rem; font-size: 0.9rem; color: var(--color-text-secondary);}
+  </style>
+</head>
+<body>
+  <div class="bg-grid"></div>
+
+  <div class="progress-bar-container">
+    <div class="progress-bar" id="progress-bar"></div>
+  </div>
+
+  <div class="shell" id="presentation-shell">
+    <div class="content">
+      
+      <div class="top">
+        <div>
+          <div class="top-title">AIBrix StormService — P/D Disaggregation</div>
+          <div class="top-sub">Model: Llama-3.2-1B-Instruct | MI300X Hardware Optimization</div>
+        </div>
+        <div>
+          <div class="badges">
+            <span class="badge b-amd">AMD MI300X (3 GPUs)</span>
+            <span class="badge b-blue">SGLang v0.5.8</span>
+            <span class="badge b-green">Mooncake KV</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="tabs" role="tablist">
+        <button class="tab active" role="tab" data-tab="overview">1. Topology Flow</button>
+        <button class="tab" role="tab" data-tab="router">2. Routing Logic</button>
+        <button class="tab" role="tab" data-tab="prefill">3. Prefill (TP=1)</button>
+        <button class="tab" role="tab" data-tab="decode">4. Decode (TP=2)</button>
+        <button class="tab" role="tab" data-tab="manifest">5. Manifest Skeleton</button>
+      </div>
+
+      <div class="panel active" id="tab-overview" role="tabpanel">
+        <div class="narr animate-1" style="margin-bottom: 1rem;">
+          <div class="narr-lbl">Disaggregated Architecture Overview</div>
+          <p>This deployment strictly isolates prefill and decode phases across AMD MI300X GPUs. Traffic is managed by a stateless CPU router. The single-GPU prefill node crunches context and ships the KV cache via Mooncake to a high-throughput, gang-scheduled decode cluster spanning two physical nodes.</p>
+        </div>
+
+        <div class="section-lbl animate-2">📊 Live Hardware Request Flow</div>
+        <div class="flow animate-2">
+          <div class="flow-node node-pulse" style="border-color:var(--color-border-secondary)">Incoming Request</div>
+          <div class="flow-arrow"><div class="flow-label">Dispatched</div></div>
+          <div class="flow-node" style="border-color:var(--color-text-info)">Router (CPU)<br><small style="color:var(--color-text-info)">Random Policy</small></div>
+          <div class="flow-arrow"><div class="flow-label">Routes</div></div>
+          <div class="flow-node" style="border-color:var(--color-text-warning)">Prefill (TP=1)<br><small style="color:var(--color-text-warning)">Generates Cache</small></div>
+          <div class="flow-arrow"><div class="flow-label" style="color:#bc8cff">Mooncake</div></div>
+          <div class="flow-node node-pulse" style="border-color:var(--color-text-success); box-shadow: 0 0 20px rgba(0,255,170,0.2);">Decode (TP=2)<br><small style="color:var(--color-text-success)">Gang-Scheduled</small></div>
+          <div class="flow-arrow"><div class="flow-label">Streams</div></div>
+          <div class="flow-node node-pulse" style="border-color:var(--color-border-secondary)">Generated Tokens</div>
+        </div>
+
+        <div class="section-lbl animate-3">🎭 Component Configuration</div>
+        <div class="roles animate-3">
+          <div class="role-card">
+            <div class="role-head" style="color:var(--color-text-info)"><span>🚦</span> Router Layer (CPU)</div>
+            <div class="role-body">Runs <code>aibrix/sglang-router</code> with <code>--pd-disaggregation</code>. Polls port 30000 via K8s service discovery to maintain active maps of worker pods.</div>
+          </div>
+          <div class="role-card">
+            <div class="role-head" style="color:var(--color-text-warning)"><span>⚡</span> Prefill Engine (1x MI300X)</div>
+            <div class="role-body">SGLang in <code>prefill</code> mode. Dedicated entirely to prompt computation. Transmits state via Mooncake.</div>
+          </div>
+          <div class="role-card">
+            <div class="role-head" style="color:var(--color-text-success)"><span>🔄</span> Decode Cluster (2x MI300X)</div>
+            <div class="role-body">Demands <code>podGroupSize: 2</code> for atomic scheduling. Rank is mapped dynamically to the StatefulSet hostnames.</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel" id="tab-router" role="tabpanel">
+        <div class="split-grid">
+          <div class="col-left animate-1">
+            <div class="narr">
+              <div class="narr-lbl">Routing Layer & Service Discovery</div>
+              <p>Operating entirely on CPU, this pod acts as the traffic cop. It requires the <code>sglang-router-sa</code> ServiceAccount to LIST/WATCH pods. It targets explicit replicas using the <code>role-replica-index=0</code> label, ensuring traffic hits the active heads of the StatefulSets.</p>
+            </div>
+            
+            <div class="section-lbl">🔍 Discovery Configuration</div>
+            <table class="kv">
+              <tr><td><code>--prefill-selector</code></td><td>Matches <code>role-name=prefill</code> and specifically <code>role-replica-index=0</code></td></tr>
+              <tr><td><code>--decode-selector</code></td><td>Matches <code>role-name=decode</code> and specifically <code>role-replica-index=0</code></td></tr>
+              <tr><td><code>--service-discovery-port</code></td><td>Targeting <code>30000</code> exposed by all workers.</td></tr>
+            </table>
+          </div>
+          
+          <div class="col-right animate-2">
+            <div class="code-window">
+              <div class="code-header"><div class="code-dots"><div></div><div></div><div></div></div>Container: mini-lb | Command Injection</div>
+              <div class="code-body">
+<span class="y-comment"># Image: aibrix/sglang-router:v0.1.7-patch.1-20250731</span>
+<span class="y-cmd">python3</span> -m sglang_router.launch_router \
+  <span class="y-key">--host</span> <span class="y-str">0.0.0.0</span> \
+  <span class="y-key">--pd-disaggregation</span> \
+  <span class="y-key">--policy</span> <span class="y-str">random</span> \
+  <span class="y-key">--service-discovery</span> \
+  <span class="y-key">--service-discovery-port</span> <span class="y-str">30000</span> \
+  <span class="y-key">--worker-startup-timeout-secs</span> <span class="y-str">900</span> \
+  <span class="y-key">--prefill-selector</span> \
+    storm-service-name=<span class="y-str">$STORM_SERVICE_NAME</span> \
+    role-name=<span class="y-str">prefill</span> \
+    stormservice.orchestration.aibrix.ai/role-replica-index=<span class="y-str">0</span> \
+  <span class="y-key">--decode-selector</span> \
+    storm-service-name=<span class="y-str">$STORM_SERVICE_NAME</span> \
+    role-name=<span class="y-str">decode</span> \
+    stormservice.orchestration.aibrix.ai/role-replica-index=<span class="y-str">0</span> \
+  <span class="y-key">--service-discovery-namespace</span> <span class="y-str">default</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel" id="tab-prefill" role="tabpanel">
+        <div class="split-grid">
+          <div class="col-left animate-1">
+            <div class="narr">
+              <div class="narr-lbl">Prefill Hardware Layer (TP=1)</div>
+              <p>Reserved strictly for 1 MI300X GPU. Instead of token generation, it mathematically constructs the KV Cache and transmits it via Mooncake. Crucial hardware optimizations are enforced via environment variables to prevent ROCm latency spikes.</p>
+            </div>
+            
+            <div class="section-lbl">⚙️ ROCm OS Optimizations</div>
+            <table class="kv">
+              <tr><td><code>HSA_NO_SCRATCH_RECLAIM=1</code></td><td>Stops ROCm scratch memory reclamation.</td></tr>
+              <tr><td><code>GPU_FORCE_BLIT_COPY_SIZE=6</code></td><td>Optimizes blit copying for small tensors on MI300X.</td></tr>
+              <tr><td><code>TORCH_BLAS_PREFER_HIPBLASLT=1</code></td><td>Prefers hipBLASLt over rocBLAS for faster GEMMs.</td></tr>
+              <tr><td><code>securityContext: IPC_LOCK</code></td><td>Locks memory to prevent OS paging to disk.</td></tr>
+            </table>
+          </div>
+          
+          <div class="col-right animate-2">
+            <div class="code-window">
+              <div class="code-header"><div class="code-dots"><div></div><div></div><div></div></div>Container: prefill | SGLang Launch</div>
+              <div class="code-body">
+<span class="y-comment"># Image: lmsysorg/sglang:v0.5.8-rocm700-mi30x</span>
+<span class="y-cmd">python3</span> -m sglang.launch_server \
+  <span class="y-key">--model-path</span> <span class="y-str">/models/Llama-3.2-1B-Instruct</span> \
+  <span class="y-key">--served-model-name</span> <span class="y-str">Llama-3.2-1B-Instruct</span> \
+  <span class="y-key">--host</span> <span class="y-str">0.0.0.0</span> \
+  <span class="y-key">--port</span> <span class="y-str">30000</span> \
+  <span class="y-key">--disaggregation-mode</span> <span class="y-str">prefill</span> \
+  <span class="y-key">--disaggregation-transfer-backend</span> <span class="y-str">mooncake</span> \
+  <span class="y-key">--dtype</span> <span class="y-str">bfloat16</span> \
+  <span class="y-key">--trust-remote-code</span> \
+  <span class="y-key">--tp-size</span> <span class="y-str">1</span> \
+  <span class="y-key">--nnodes</span> <span class="y-str">1</span> \
+  <span class="y-key">--mem-fraction-static</span> <span class="y-str">0.8</span> \
+  <span class="y-key">--log-level</span> <span class="y-str">debug</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel" id="tab-decode" role="tabpanel">
+        <div class="split-grid">
+          <div class="col-left animate-1">
+            <div class="narr">
+              <div class="narr-lbl">Distributed Decode (TP=2)</div>
+              <p>Spread across 2 physical instances. Aibrix manages <code>podGroupSize: 2</code> for atomic scheduling. Rank-1 uses a pure Bash <code>/dev/tcp</code> polling loop to wait for Rank-0, eliminating external dependencies from the base ROCm container.</p>
+            </div>
+            
+            <div class="section-lbl">🏎️ Network Sync Variables</div>
+            <table class="kv">
+              <tr><td><code>NCCL_IB_DISABLE=1</code></td><td>Forces standard Ethernet usage over InfiniBand.</td></tr>
+              <tr><td><code>SYS_ADMIN</code> & <code>SYS_PTRACE</code></td><td>Capabilities required for Mooncake memory injection.</td></tr>
+              <tr><td>Bash Rank Derivation</td><td>Parses StatefulSet index: <code>decode-&lt;hash&gt;-0-&lt;RANK&gt;</code></td></tr>
+            </table>
+          </div>
+          
+          <div class="col-right animate-2">
+            <div class="code-window">
+              <div class="code-header"><div class="code-dots"><div></div><div></div><div></div></div>Container: decode | Bash Logic</div>
+              <div class="code-body">
+<span class="y-comment"># Derive Node Rank from Hostname</span>
+NODE_RANK=$(echo $HOSTNAME | awk -F'-' '{print $NF}')
+
+<span class="y-comment"># Derive Master DNS (Rank 0)</span>
+MASTER_HOSTNAME=$(echo $HOSTNAME | sed 's/-[0-9]*$/-0/')
+MASTER_DNS="${MASTER_HOSTNAME}.${STORM_SERVICE_NAME}.default.svc.cluster.local"
+MASTER_PORT=<span class="y-str">29500</span>
+
+<span class="y-comment"># Rank-1 blocking wait using pure bash</span>
+<span class="y-cmd">if</span> [ "$NODE_RANK" != "0" ]; <span class="y-cmd">then</span>
+  <span class="y-cmd">until</span> timeout 3 bash -c "echo > /dev/tcp/${MASTER_DNS}/${MASTER_PORT}" 2>/dev/null; <span class="y-cmd">do</span>
+    sleep 3
+  <span class="y-cmd">done</span>
+<span class="y-cmd">fi</span>
+
+<span class="y-comment"># Launch Engine</span>
+<span class="y-cmd">python3</span> -m sglang.launch_server \
+  <span class="y-key">--disaggregation-mode</span> <span class="y-str">decode</span> \
+  <span class="y-key">--disaggregation-transfer-backend</span> <span class="y-str">mooncake</span> \
+  <span class="y-key">--tp-size</span> <span class="y-str">2</span> <span class="y-key">--nnodes</span> <span class="y-str">2</span> \
+  <span class="y-key">--node-rank</span> <span class="y-str">$NODE_RANK</span> \
+  <span class="y-key">--dist-init-addr</span> <span class="y-str">${MASTER_DNS}:${MASTER_PORT}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel" id="tab-manifest" role="tabpanel">
+        <div class="split-grid">
+          <div class="col-left animate-1">
+            <div class="narr">
+              <div class="narr-lbl">CRD Architectural Skeleton</div>
+              <p>Aibrix uses the <code>StormService</code> Custom Resource to package the entire inference microservice into a single deployable object. By setting <code>stateful: true</code>, it guarantees the stable network identities needed for multi-node Tensor Parallelism.</p>
+            </div>
+            
+            <div class="section-lbl">📂 Topology Mapping</div>
+            <table class="kv">
+              <tr><td><code>routing</code></td><td>1 Replica • CPU Only</td></tr>
+              <tr><td><code>prefill</code></td><td>1 Replica • 1 GPU (TP=1)</td></tr>
+              <tr><td><code>decode</code></td><td>1 Replica • 2 GPUs (TP=2) • Gang-Scheduled</td></tr>
+            </table>
+          </div>
+          
+          <div class="col-right animate-2">
+            <div class="code-window">
+              <div class="code-header"><div class="code-dots"><div></div><div></div><div></div></div>StormService YAML Skeleton</div>
+              <div class="code-body">
+<span class="y-key">apiVersion</span>: <span class="y-kind">orchestration.aibrix.ai/v1alpha1</span>
+<span class="y-key">kind</span>: <span class="y-kind">StormService</span>
+<span class="y-key">metadata</span>: 
+  <span class="y-key">name</span>: <span class="y-str">tp-1p1d-mi300x</span>
+<span class="y-key">spec</span>:
+  <span class="y-key">replicas</span>: <span class="y-val">1</span>
+  <span class="y-key">stateful</span>: <span class="y-val">true</span>
+  
+  <span class="y-key">roles</span>:
+  <span class="y-comment"># ── Traffic Controller ──────────────────────</span>
+  - <span class="y-key">name</span>: <span class="y-str">routing</span>
+    <span class="y-key">replicas</span>: <span class="y-val">1</span>
+    <span class="y-key">stateful</span>: <span class="y-val">true</span>
+    
+  <span class="y-comment"># ── Single GPU Prompt Processing ────────────</span>
+  - <span class="y-key">name</span>: <span class="y-str">prefill</span>
+    <span class="y-key">replicas</span>: <span class="y-val">1</span>
+    <span class="y-key">stateful</span>: <span class="y-val">true</span>
+    
+  <span class="y-comment"># ── Multi-Node Token Generation ─────────────</span>
+  - <span class="y-key">name</span>: <span class="y-str">decode</span>
+    <span class="y-key">replicas</span>: <span class="y-val">1</span>
+    <span class="y-key">podGroupSize</span>: <span class="y-val">2</span>   <span class="y-comment"># Triggers Gang Scheduler</span>
+    <span class="y-key">stateful</span>: <span class="y-val">true</span>    <span class="y-comment"># Required for DNS rank logic</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+  
+  <script>
+    const tabs = Array.from(document.querySelectorAll('.tab'));
+    const progressBar = document.getElementById('progress-bar');
+    
+    let currentTabIndex = 0;
+    let progressInterval;
+    let slideDuration = 10000; // 10 seconds per slide
+    let currentProgress = 0;
+
+    // Core Switch Logic
+    function switchTab(index) {
+      currentTabIndex = index;
+      const tabId = tabs[index].dataset.tab;
+
+      tabs.forEach((tab, i) => {
+        const isActive = i === index;
+        tab.classList.toggle('active', isActive);
+      });
+      
+      document.querySelectorAll('.panel').forEach(panel => {
+        panel.classList.remove('active');
+        void panel.offsetWidth; // Force CSS reflow to restart animations
+        if(panel.id === `tab-${tabId}`) {
+            panel.classList.add('active');
+        }
+      });
+
+      // Reset progress bar loop
+      currentProgress = 0;
+      progressBar.style.width = '0%';
+    }
+
+    // Autoplay Engine (Starts automatically)
+    function startAutoplay() {
+      progressInterval = setInterval(() => {
+        currentProgress += 50; 
+        const percentage = (currentProgress / slideDuration) * 100;
+        progressBar.style.width = `${percentage}%`;
+
+        if (currentProgress >= slideDuration) {
+          currentProgress = 0;
+          currentTabIndex = (currentTabIndex + 1) % tabs.length;
+          switchTab(currentTabIndex);
+        }
+      }, 50);
+    }
+
+    // Initialize automatically
+    window.onload = () => {
+      startAutoplay();
+    };
+
+    // Allow user to interrupt / skip around manually (resets the timer for that slide)
+    document.addEventListener('click', (e) => {
+      if (e.target.matches('[data-tab]')) {
+        const index = tabs.indexOf(e.target);
+        switchTab(index); 
+      }
+    });
+
+    // Keyboard navigation
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'ArrowLeft' && currentTabIndex > 0) {
+        switchTab(currentTabIndex - 1);
+      } else if (e.key === 'ArrowRight' && currentTabIndex < tabs.length - 1) {
+        switchTab(currentTabIndex + 1);
+      }
+    });
+  </script>
+</body>
+</html>

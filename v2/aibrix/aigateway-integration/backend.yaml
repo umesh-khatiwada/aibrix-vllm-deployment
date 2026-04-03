@@ -1,0 +1,10 @@
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: Backend
+metadata:
+  name: deepseek-r1-distill-llama-8b-backend
+  namespace: aibrix-system
+spec:
+  endpoints:
+    - fqdn:
+        hostname: deepseek-r1-distill-llama-8b.default.svc.cluster.local
+        port: 8000

@@ -1,0 +1,249 @@
+
+apiVersion: orchestration.aibrix.ai/v1alpha1
+kind: StormService
+metadata:
+  name: tp-1p1d-mi300x
+spec:
+  replicas: 1
+  updateStrategy:
+    type: InPlaceUpdate
+  stateful: true
+  selector:
+    matchLabels:
+      app: tp-1p1d-mi300x
+  template:
+    metadata:
+      labels:
+        app: tp-1p1d-mi300x
+    spec:
+      roles:
+        - name: routing
+          replicas: 1
+          stateful: true
+          template:
+            spec:
+              serviceAccountName: sglang-router-sa
+              containers:
+                - name: mini-lb
+                  #image: aibrix/sglang-router:v0.1.6
+                  image: aibrix/sglang-router:v0.1.7-patch.1-20250731
+
+                  command: ["sh", "-c"]
+                  args:
+                    - |
+                      python3 -m sglang_router.launch_router --host 0.0.0.0 --pd-disaggregation --policy random --service-discovery --service-discovery-port 30000 --worker-startup-timeout-secs 900 --prefill-selector storm-service-name=$STORM_SERVICE_NAME role-name=prefill stormservice.orchestration.aibrix.ai/role-replica-index=0 --decode-selector storm-service-name=$STORM_SERVICE_NAME role-name=decode stormservice.orchestration.aibrix.ai/role-replica-index=0 --service-discovery-namespace default
+
+                      # python3 -m sglang_router.launch_router \
+                      #   --host 0.0.0.0 
+                      #   --pd-disaggregation \
+                      #   --policy random \
+                      #   --service-discovery \
+                      #   --service-discovery-port 30000 \
+                      #   --prefill-selector storm-service-name=$STORM_SERVICE_NAME role-name=prefill stormservice.orchestration.aibrix.ai/role-replica-index=0 \
+                      #   --decode-selector storm-service-name=$STORM_SERVICE_NAME role-name=decode stormservice.orchestration.aibrix.ai/role-replica-index=0 \
+                      #   --service-discovery-namespace default
+        - name: prefill
+          replicas: 1
+         # podGroupSize: 1
+          stateful: true
+          template:
+            metadata:
+              labels:
+                app: tp-1p1d-mi300x
+                stormservice.orchestration.aibrix.ai/role-name: prefill
+                stormservice.orchestration.aibrix.ai/storm-service-name: tp-1p1d-mi300x
+                model.aibrix.ai/name: Llama-3.2-1B-Instruct
+                model.aibrix.ai/port: "30000"
+                model.aibrix.ai/engine: sglang
+            spec:
+              containers:
+                - name: prefill
+                  image: lmsysorg/sglang:v0.5.8-rocm700-mi30x
+                  command: ["sh", "-c"]
+                  args:
+                    - |
+                      python3 -m sglang.launch_server \
+                        --model-path /models/Llama-3.2-1B-Instruct \
+                        --served-model-name Llama-3.2-1B-Instruct \
+                        --host 0.0.0.0 \
+                        --port 30000 \
+                        --disaggregation-mode prefill \
+                        --disaggregation-transfer-backend mooncake \
+                        --dtype bfloat16 \
+                        --trust-remote-code \
+                        --tp-size 1 \
+                        --nnodes 1 \
+                        --mem-fraction-static 0.8 \
+                        --log-level debug
+                  env:
+                    # ── Networking ──────────────────────────────────────────
+                    - name: GLOO_SOCKET_IFNAME
+                      value: eth0
+                    # - name: NCCL_SOCKET_IFNAME
+                    #   value: eth0
+                    # - name: NCCL_IB_DISABLE
+                    #   value: "0"
+                    # - name: NCCL_IB_GID_INDEX
+                    #   value: "7"
+                    # - name: NCCL_DEBUG
+                    #   value: "INFO"
+                    # - name: UCX_TLS
+                    #   value: ^gga
+
+                    # ── MI300X ROCm performance flags ───────────────────────
+                    - name: HSA_NO_SCRATCH_RECLAIM
+                      value: "1"               # prevents  scratch reclaim issues on MI300X
+                    - name: GPU_FORCE_BLIT_COPY_SIZE
+                      value: "6"               # optimizes memory copy on MI300X
+                    - name: HIP_FORCE_DEV_KERNARG
+                      value: "1"               # improves HIP kernel launch perf
+                    - name: TORCH_BLAS_PREFER_HIPBLASLT
+                      value: "1"               # better GEMM on MI300X
+
+                  volumeMounts:
+                    - name: model-vol
+                      mountPath: /models
+                      readOnly: true
+                    - name: shared-mem
+                      mountPath: /dev/shm
+
+                  resources:
+                    limits:
+                      amd.com/gpu: 1
+
+                  securityContext:
+                    capabilities:
+                      add:
+                        - IPC_LOCK
+
+              volumes:
+                - name: model-vol
+                  hostPath:
+                    path: /data01/models
+                    type: Directory
+                - name: shared-mem
+                  emptyDir:
+                    medium: Memory
+        - name: decode
+          replicas: 1
+          podGroupSize: 2
+          stateful: true
+          template:
+            metadata:
+              labels:
+                app: tp-1p1d-mi300x
+                stormservice.orchestration.aibrix.ai/role-name: decode
+                stormservice.orchestration.aibrix.ai/storm-service-name: tp-1p1d-mi300x
+                model.aibrix.ai/name: Llama-3.2-1B-Instruct
+                model.aibrix.ai/port: "30000"
+                model.aibrix.ai/engine: sglang
+            spec:
+              containers:
+                - name: decode
+                  image: lmsysorg/sglang:v0.5.8-rocm700-mi30x
+                  command: ["sh", "-c"]
+                  args:
+                    - |
+                      # ── Derive rank and master address from hostname ──────────
+                      # HOSTNAME looks like: tp-1p1d-mi300x-roleset-rxpgz-decode-6449f7-0-{RANK}
+                      # The last segment after the final dash is our node rank
+
+                      NODE_RANK=$(echo $HOSTNAME | awk -F'-' '{print $NF}')
+                      echo "[INFO] My hostname: $HOSTNAME"
+                      echo "[INFO] My node rank: $NODE_RANK"
+
+                      # Rank 0 pod hostname = same name but with last digit = 0
+                      # Replace trailing rank digit with 0 to get master hostname
+                      MASTER_HOSTNAME=$(echo $HOSTNAME | sed 's/-[0-9]*$/-0/')
+                      MASTER_DNS="${MASTER_HOSTNAME}.${STORM_SERVICE_NAME}.default.svc.cluster.local"
+                      MASTER_PORT=29500
+
+                      echo "[INFO] Master hostname: $MASTER_HOSTNAME"
+                      echo "[INFO] Master DNS: $MASTER_DNS"
+
+                      # ── Wait for rank 0 to be reachable before starting ──────
+                      # (rank 1 must not init before rank 0 is listening)
+                      if [ "$NODE_RANK" != "0" ]; then
+                        echo "[INFO] I am rank $NODE_RANK, waiting for master $MASTER_DNS:$MASTER_PORT ..."
+                        until nc -z $MASTER_DNS $MASTER_PORT 2>/dev/null; do
+                          echo "[WAITING] $(date -u +'%Y-%m-%dT%H:%M:%SZ') master not ready..."
+                          sleep 3
+                        done
+                        echo "[SUCCESS] Master is reachable!"
+                      fi
+
+                      # ── Launch SGLang with correct multi-node TP args ─────────
+                      python3 -m sglang.launch_server \
+                        --model-path /models/Llama-3.2-1B-Instruct \
+                        --served-model-name Llama-3.2-1B-Instruct \
+                        --host 0.0.0.0 \
+                        --port 30000 \
+                        --disaggregation-mode decode \
+                        --disaggregation-transfer-backend mooncake \
+                        --dtype bfloat16 \
+                        --trust-remote-code \
+                        --tp-size 2 \
+                        --nnodes 2 \
+                        --node-rank $NODE_RANK \
+                        --dist-init-addr ${MASTER_DNS}:${MASTER_PORT} \
+                        --mem-fraction-static 0.8 \
+                        --log-level debug
+                  env:
+                    - name: NCCL_SOCKET_IFNAME
+                      value: eth0
+                    - name: GLOO_SOCKET_IFNAME
+                      value: eth0
+                    - name: NCCL_IB_DISABLE
+                      value: "1"          # you have ethernet only, no InfiniBand
+                    - name: NCCL_DEBUG
+                      value: "INFO"       # keep verbose until confirmed working
+                    - name: HSA_NO_SCRATCH_RECLAIM
+                      value: "1"
+                    - name: GPU_FORCE_BLIT_COPY_SIZE
+                      value: "6"
+                    - name: HIP_FORCE_DEV_KERNARG
+                      value: "1"
+                    - name: TORCH_BLAS_PREFER_HIPBLASLT
+                      value: "1"
+                  volumeMounts:
+                    - name: model-vol
+                      mountPath: /models
+                      readOnly: true
+                    - name: shared-mem
+                      mountPath: /dev/shm
+                  resources:
+                    limits:
+                      amd.com/gpu: 1
+                  securityContext:
+                    capabilities:
+                      add:
+                        - IPC_LOCK
+                        - SYS_ADMIN
+                        - SYS_PTRACE
+
+                  volumeMounts:
+                    - name: model-vol
+                      mountPath: /models
+                      readOnly: true
+                    - name: shared-mem
+                      mountPath: /dev/shm
+
+                  resources:
+                    limits:
+                      amd.com/gpu: 1
+
+                  securityContext:
+                    capabilities:
+                      add:
+                        - IPC_LOCK
+                        - SYS_ADMIN
+                        - SYS_PTRACE
+
+              volumes:
+                - name: model-vol
+                  hostPath:
+                    path: /data01/models
+                    type: Directory
+                - name: shared-mem
+                  emptyDir:
+                    medium: Memory

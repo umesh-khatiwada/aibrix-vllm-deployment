@@ -1,0 +1,217 @@
+# FROM rocm/vllm-dev:nightly_0624_rc2_0624_rc2_20250620
+# 
+# RUN git clone https://github.com/LMCache/LMCache.git /opt/lmcache \
+#     && cd /opt/lmcache \
+#     && pip install -r requirements/build.txt \
+#     && PYTORCH_ROCM_ARCH="gfx942" \
+#        TORCH_DONT_CHECK_COMPILER_ABI=1 \
+#        CXX=hipcc \
+#        BUILD_WITH_HIP=1 \
+#        python3 -m pip install --no-build-isolation -e . \
+#     && python3 -c "import lmcache.c_ops"  # verify
+# 
+# WORKDIR /workspace
+# 
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: lmcache-configs
+  namespace: default
+data:
+  prefiller.yaml: |
+    local_cpu: False
+    enable_pd: True
+    transfer_channel: "nixl"
+    pd_role: "sender"
+    pd_proxy_host: "lmcache-proxy-svc"  # proxy service DNS
+    pd_proxy_port: 7500
+    pd_buffer_size: 1073741824
+    pd_buffer_device: "cuda"
+    nixl_backends: [UCX]
+
+  decoder.yaml: |
+    local_cpu: False
+    enable_pd: True
+    transfer_channel: "nixl"
+    pd_role: "receiver"
+    pd_peer_host: "0.0.0.0"
+    pd_peer_init_port: 7300
+    pd_peer_alloc_port: 7400
+    pd_buffer_size: 2147483648
+    pd_buffer_device: "cuda"
+    nixl_backends: [UCX]
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: lmcache-prefill-0
+  namespace: default
+spec:
+  nodeName: server-1          # pin to server 1
+  hostIPC: true               # enables hip_ipc if same node
+  containers:
+    - name: prefill
+      image: your-registry/lmcache-rocm:latest
+      env:
+        - name: PYTHONHASHSEED
+          value: "0"           # MANDATORY
+        - name: LMCACHE_CONFIG_FILE
+          value: /configs/prefiller.yaml
+        - name: UCX_TLS
+          value: "tcp"         # TCP only — no RDMA available
+        - name: UCX_NET_DEVICES
+          value: "eth0:1"      # your NIC name
+        - name: HSA_NO_SCRATCH_RECLAIM
+          value: "1"
+        - name: GPU_FORCE_BLIT_COPY_SIZE
+          value: "6"
+        - name: HIP_FORCE_DEV_KERNARG
+          value: "1"
+        - name: TORCH_BLAS_PREFER_HIPBLASLT
+          value: "1"
+        - name: ROCR_VISIBLE_DEVICES
+          value: "0"
+      command: ["sh", "-c"]
+      args:
+        - |
+          vllm serve /models/Llama-3.2-1B-Instruct \
+            --served-model-name Llama-3.2-1B-Instruct \
+            --host 0.0.0.0 \
+            --port 7100 \
+            --dtype bfloat16 \
+            --trust-remote-code \
+            --enforce-eager \
+            --no-enable-prefix-caching \
+            --kv-transfer-config \
+            '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_producer","kv_connector_extra_config":{"discard_partial_chunks":false,"lmcache_rpc_port":"producer1"}}'
+      resources:
+        limits:
+          amd.com/gpu: "1"
+      securityContext:
+        capabilities:
+          add: ["IPC_LOCK", "SYS_PTRACE"]
+      volumeMounts:
+        - name: models
+          mountPath: /models
+          readOnly: true
+        - name: configs
+          mountPath: /configs
+        - name: shm
+          mountPath: /dev/shm
+  volumes:
+    - name: models
+      hostPath:
+        path: /data01/models
+    - name: configs
+      configMap:
+        name: lmcache-configs
+    - name: shm
+      emptyDir:
+        medium: Memory
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: lmcache-decode-0
+  namespace: default
+spec:
+  nodeName: server-2          # pin to server 2
+  hostIPC: true
+  containers:
+    - name: decode
+      image: your-registry/lmcache-rocm:latest
+      env:
+        - name: PYTHONHASHSEED
+          value: "0"           # MANDATORY — must match prefill
+        - name: LMCACHE_CONFIG_FILE
+          value: /configs/decoder.yaml
+        - name: UCX_TLS
+          value: "tcp"
+        - name: UCX_NET_DEVICES
+          value: "eth0:1"
+        - name: HSA_NO_SCRATCH_RECLAIM
+          value: "1"
+        - name: GPU_FORCE_BLIT_COPY_SIZE
+          value: "6"
+        - name: HIP_FORCE_DEV_KERNARG
+          value: "1"
+        - name: TORCH_BLAS_PREFER_HIPBLASLT
+          value: "1"
+        - name: ROCR_VISIBLE_DEVICES
+          value: "0"
+      command: ["sh", "-c"]
+      args:
+        - |
+          vllm serve /models/Llama-3.2-1B-Instruct \
+            --served-model-name Llama-3.2-1B-Instruct \
+            --host 0.0.0.0 \
+            --port 7200 \
+            --dtype bfloat16 \
+            --trust-remote-code \
+            --enforce-eager \
+            --no-enable-prefix-caching \
+            --kv-transfer-config \
+            '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_consumer","kv_connector_extra_config":{"discard_partial_chunks":false,"lmcache_rpc_port":"consumer1","skip_last_n_tokens":1}}'
+      resources:
+        limits:
+          amd.com/gpu: "1"
+      securityContext:
+        capabilities:
+          add: ["IPC_LOCK", "SYS_PTRACE"]
+      volumeMounts:
+        - name: models
+          mountPath: /models
+          readOnly: true
+        - name: configs
+          mountPath: /configs
+        - name: shm
+          mountPath: /dev/shm
+  volumes:
+    - name: models
+      hostPath:
+        path: /data01/models
+    - name: configs
+      configMap:
+        name: lmcache-configs
+    - name: shm
+      emptyDir:
+        medium: Memory
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: lmcache-proxy
+  namespace: default
+spec:
+  nodeName: server-4          # no GPU needed
+  containers:
+    - name: proxy
+      image: your-registry/lmcache-rocm:latest
+      command: ["sh", "-c"]
+      args:
+        - |
+          python3 /opt/lmcache/examples/disagg_prefill/disagg_proxy_server.py \
+            --host 0.0.0.0 \
+            --port 9100 \
+            --prefiller-host lmcache-prefill-0-svc \
+            --prefiller-port 7100 \
+            --num-prefillers 1 \
+            --decoder-host lmcache-decode-0-svc \
+            --decoder-port 7200 \
+            --decoder-init-port 7300 \
+            --decoder-alloc-port 7400 \
+            --proxy-host 0.0.0.0 \
+            --proxy-port 7500 \
+            --num-decoders 1
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: lmcache-proxy-svc
+spec:
+  selector:
+    app: lmcache-proxy
+  ports:
+    - port: 9100
+      targetPort: 9100

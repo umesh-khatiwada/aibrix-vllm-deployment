@@ -1,0 +1,76 @@
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: Backend
+metadata:
+  name: qwen-coder-1-5b-instruct-backend
+  namespace: aibrix-system
+spec:
+  endpoints:
+    - fqdn:
+        hostname: qwen-coder-1-5b-instruct.default.svc.cluster.local
+        port: 8000
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: Backend
+metadata:
+  name: qwen-code-lora
+  namespace: aibrix-system
+spec:
+  endpoints:
+    - fqdn:
+        hostname: qwen-code-lora.default.svc.cluster.local
+        port: 8000
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: Backend
+metadata:
+  name: qwen-code-educational
+  namespace: aibrix-system
+spec:
+  endpoints:
+    - fqdn:
+        hostname: qwen-code-educational.default.svc.cluster.local
+        port: 8000
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: Backend
+metadata:
+  name: qwen-code-flutter-dev-lora
+  namespace: aibrix-system
+spec:
+  endpoints:
+    - fqdn:
+        hostname: qwen-code-flutter-dev-lora.default.svc.cluster.local
+        port: 8000
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: Backend
+metadata:
+  name: qwen-code-n8n-workflow-generator-lora
+  namespace: aibrix-system
+spec:
+  endpoints:
+    - fqdn:
+        hostname: qwen-code-n8n-workflow-generator-lora.default.svc.cluster.local
+        port: 8000
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: Backend
+metadata:
+  name: qwen-code-sql-lora
+  namespace: aibrix-system
+spec:
+  endpoints:
+    - fqdn:
+        hostname: qwen-code-sql-lora.default.svc.cluster.local
+        port: 8000
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: Backend
+metadata:
+  name: yugdave-finetuned-query-response
+  namespace: aibrix-system
+spec:
+  endpoints:
+    - fqdn:
+        hostname: yugdave-finetuned-query-response.default.svc.cluster.local
+        port: 8000

@@ -1,0 +1,326 @@
+---
+# ------------------------------
+# Prefill Server Service
+# ------------------------------
+apiVersion: v1
+kind: Service
+metadata:
+  name: sglang-prefill
+  namespace: sglang
+spec:
+  selector:
+    app: sglang-prefill
+  ports:
+    - protocol: TCP
+      port: 8998
+      name: grpc-bootstrap
+      targetPort: 8998
+    - protocol: TCP
+      port: 8898
+      name: http
+      targetPort: 8898
+  type: NodePort
+---
+# ------------------------------
+# Prefill Server Deployment
+# ------------------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sglang-prefill
+  namespace: sglang
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sglang-prefill
+  template:
+    metadata:
+      labels:
+        app: sglang-prefill
+    spec:
+      restartPolicy: Always
+      containers:
+        - name: sglang-prefill
+          image: lmsysorg/sglang:v0.5.8-rocm700-mi30x
+          resources:
+             limits:
+                amd.com/gpu: 2
+          command: ["python3", "-m", "sglang.launch_server"]
+          args:
+            - "--model-path"
+            - "/models/llama3-1b"
+            - "--trust-remote-code"
+            - "--stream-output"
+            - "--host"
+            - "0.0.0.0"
+            - "--port"
+            - "8898"
+            - "--mem-fraction-static"
+            - "0.9"
+            - "--disable-radix-cache"
+            - "--tp-size"
+            - "2"
+            - "--base-gpu-id"
+            - "0"
+            - "--quantization"
+            - "fp8"
+            - "--disaggregation-mode"
+            - "prefill"
+            - "--disaggregation-bootstrap-port"
+            - "8998"
+          env:
+            - name: HUGGINGFACE_HUB_CACHE
+              value: "/models"
+            - name: MODELSCOPE_CACHE
+              value: "/models"
+          ports:
+          - name: grpc-bootstrap
+            containerPort: 8998
+          - name: http
+            containerPort: 8898
+          volumeMounts:
+            - name: models
+              mountPath: /models
+          securityContext:
+            privileged: true
+            capabilities:
+              add: ["SYS_ADMIN", "SYS_PTRACE"]
+      volumes:
+        - name: models
+          hostPath:
+            path: /home/amd/models
+            type: Directory
+
+
+---
+# ------------------------------
+# Decode Server Service
+# ------------------------------
+apiVersion: v1
+kind: Service
+metadata:
+  name: sglang-decode
+  namespace: sglang
+spec:
+  selector:
+    app: sglang-decode
+  ports:
+    - protocol: TCP
+      port: 8898
+      name: http
+      targetPort: 8898
+  type: NodePort
+---
+# ------------------------------
+# Decode Server Deployment
+# ------------------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sglang-decode
+  namespace: sglang
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sglang-decode
+  template:
+    metadata:
+      labels:
+        app: sglang-decode
+    spec:
+      restartPolicy: Always
+      containers:
+        - name: sglang-decode
+          resources:
+             limits:
+                amd.com/gpu: 2
+          image: lmsysorg/sglang:v0.5.8-rocm700-mi30x
+          command: ["python3", "-m", "sglang.launch_server"]
+          args:
+            - "--model-path"
+            - "/models/llama3-1b"
+            - "--trust-remote-code"
+            - "--stream-output"
+            - "--host"
+            - "0.0.0.0"
+            - "--port"
+            - "8898"
+            - "--mem-fraction-static"
+            - "0.7"
+            - "--disable-radix-cache"
+            - "--tp-size"
+            - "2"
+            - "--base-gpu-id"
+            - "0"
+            - "--disaggregation-bootstrap-port"
+            - "8998"
+            - "--enable-torch-compile"
+            - "--quantization"
+            - "fp8"
+            - "--disaggregation-mode"
+            - "decode"
+            - "--disable-cuda-graph"
+          env:
+            - name: HUGGINGFACE_HUB_CACHE
+              value: "/models"
+            - name: MODELSCOPE_CACHE
+              value: "/models"
+          ports:
+          - name: http
+            containerPort: 8898
+          volumeMounts:
+            - name: models
+              mountPath: /models
+          securityContext:
+            privileged: true
+            capabilities:
+              add: ["SYS_ADMIN", "SYS_PTRACE"]
+      volumes:
+        - name: models
+          hostPath:
+            path: /home/amd/models
+---
+# ------------------------------
+# Mini Load Balancer Service
+# ------------------------------
+apiVersion: v1
+kind: Service
+metadata:
+  name: sglang-lb
+  namespace: sglang
+spec:
+  selector:
+    app: sglang-lb
+  ports:
+    - protocol: TCP
+      port: 8002
+      targetPort: 8000
+  type: NodePort
+---
+# ------------------------------
+# Mini Load Balancer Deployment
+# ------------------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sglang-lb
+  namespace: sglang
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sglang-lb
+  template:
+    metadata:
+      labels:
+        app: sglang-lb
+    spec:
+      containers:
+        - name: sglang-lb
+          resources:
+             limits:
+                amd.com/gpu: 1
+          image: lmsysorg/sglang:v0.4.7.post1-rocm630
+          command: ["python3", "-m", "sglang.srt.disaggregation.mini_lb"]
+          args:
+            - "--prefill"
+            - "http://sglang-prefill:8898"
+            - "--decode"
+            - "http://sglang-decode:8898"
+          env:
+            - name: HUGGINGFACE_HUB_CACHE
+              value: "/models"
+            - name: MODELSCOPE_CACHE
+              value: "/models"
+          volumeMounts:
+            - name: models
+              mountPath: /models
+          securityContext:
+            privileged: true
+            capabilities:
+              add: ["SYS_ADMIN", "SYS_PTRACE"]
+      volumes:
+        - name: models
+          hostPath:
+            path: /home/amd/models
+            type: Directory
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: bmk-client
+  namespace: sglang
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        feature.node.kubernetes.io/amd-gpu: "true"
+      containers:
+      - name: bmk-client
+        image: rocm/vllm-dev:nightly_main_20250706
+        imagePullPolicy: IfNotPresent
+        workingDir: /app/vllm/benchmarks
+        securityContext:
+          privileged: true
+          capabilities:
+            add:
+              - SYS_ADMIN
+              - SYS_PTRACE
+          seccompProfile:
+            type: Unconfined
+        env:
+          - name: HUGGINGFACE_HUB_CACHE
+            value: /models
+          - name: MODELSCOPE_CACHE
+            value: /models
+        resources:
+          limits:
+            amd.com/gpu: 1
+          requests:
+            amd.com/gpu: 1
+        volumeMounts:
+          - name: models
+            mountPath: /models
+        command: ["python"]
+        args:
+          - benchmark_serving.py
+          - --backend
+          - sglang
+          - --base-url
+          - "http://sglang-lb:8002"
+          - --model
+          - /models/llama3-1b
+          - --percentile-metrics
+          - ttft,tpot,itl,e2el
+          - --metric-percentiles
+          - "95,99"
+          - --request-rate
+          - "8"
+          - --max-concurrency
+          - "64"
+          - --dataset-name
+          - random
+          - --random-input-len
+          - "1024"
+          - --random-output-len
+          - "128"
+          - --random-range-ratio
+          - "0.8"
+          - --num-prompts
+          - "256"
+          - --goodput
+          -  'tpot:25'
+          - --save-result
+          - --result-dir
+          - /models/results
+          - --result-filename
+          - sglang_benchmark.json
+      volumes:
+        - name: models
+          hostPath:
+            path: /home/amd/models
+            type: Directory

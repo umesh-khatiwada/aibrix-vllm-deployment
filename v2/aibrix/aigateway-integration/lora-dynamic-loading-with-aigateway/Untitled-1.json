@@ -1,0 +1,22 @@
+curl http://165.245.138.223/v1/models
+
+
+{"data":[{"id":"qwen-coder-1-5b-instruct","created":1773919505,"object":"model","owned_by":"Envoy AI Gateway"},
+{"id":"qwen-code-lora","created":1773919505,"object":"model","owned_by":"Envoy AI Gateway"},
+{"id":"qwen-code-educational","created":1773919505,"object":"model","owned_by":"Envoy AI Gateway"},
+{"id":"qwen-code-flutter-dev-lora","created":1773919505,"object":"model","owned_by":"Envoy AI Gateway"},
+{"id":"qwen-code-n8n-workflow-generator-lora","created":1773919505,"object":"model","owned_by":"Envoy AI Gateway"},
+{"id":"qwen-code-sql-lora","created":1773919505,"object":"model","owned_by":"Envoy AI Gateway"},
+{"id":"yugdave-finetuned-query-response","created":1773919505,"object":"model","owned_by":"Envoy AI Gateway"}],"object":"list"}
+
+
+curl http://165.245.138.223/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "qwen-code-sql-lora",
+    "messages": [{"role": "user", "content": "Write a SQL query to get top 10 users by order count"}],
+    "max_tokens": 200
+  }'
+
+
+{"id":"chatcmpl-d4c5d604-473b-4cb7-8733-c26fb5c005f5","object":"chat.completion","created":1773923309,"model":"qwen-code-sql-lora","choices":[{"index":0,"message":{"role":"assistant","content":"SELECT * FROM orders GROUP BY user_id ORDER BY COUNT(*) DESC LIMIT 10","refusal":null,"annotations":null,"audio":null,"function_call":null,"tool_calls":[],"reasoning":null,"reasoning_content":null},"logprobs":null,"finish_reason":"stop","stop_reason":null,"token_ids":null}],"service_tier":null,"system_fingerprint":null,"usage":{"prompt_tokens":43,"total_tokens":61,"completion_tokens":18,"prompt_tokens_details":null},"prompt_logprobs":null,"prompt_token_ids":null,"kv_transfer_params":null}

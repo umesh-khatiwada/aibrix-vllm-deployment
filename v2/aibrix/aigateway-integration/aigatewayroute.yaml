@@ -1,0 +1,24 @@
+apiVersion: aigateway.envoyproxy.io/v1alpha1
+kind: AIGatewayRoute
+metadata:
+  name: deepseek-r1-distill-llama-8b-route
+  namespace: aibrix-system
+spec:
+  schema:
+    name: OpenAI
+    version: v1
+  parentRefs:
+    - name: aibrix-eg
+      namespace: aibrix-system
+      kind: Gateway
+  rules:
+    - matches:
+        - headers:
+            - type: Exact
+              name: x-ai-eg-model
+              value: deepseek-r1-distill-llama-8b
+      backendRefs:
+        - name: deepseek-r1-distill-llama-8b
+          namespace: aibrix-system
+          kind: AIServiceBackend
+          group: aigateway.envoyproxy.io

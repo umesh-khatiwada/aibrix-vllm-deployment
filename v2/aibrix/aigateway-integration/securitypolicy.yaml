@@ -1,0 +1,28 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: valid-api-keys
+  namespace: envoy-gateway-system
+type: Opaque
+stringData:
+  premium-key: "premium-key"
+  free-key: "free-key"
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: SecurityPolicy
+metadata:
+  name: api-key-auth
+  namespace: envoy-gateway-system
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: aibrix-ai-gateway
+  apiKeyAuth:
+    credentialRefs:
+      - name: valid-api-keys
+        namespace: envoy-gateway-system
+    extractFrom:
+      - headers:
+          - Authorization
+          - x-api-key

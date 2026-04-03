@@ -1,0 +1,278 @@
+apiVersion: orchestration.aibrix.ai/v1alpha1
+kind: RayClusterFleet
+metadata:
+  name: qwen-coder-7b-instruct
+  labels:
+    app.kubernetes.io/name: aibrix
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      model.aibrix.ai/name: qwen-coder-7b-instruct
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+  template:
+    metadata:
+      labels:
+        model.aibrix.ai/name: qwen-coder-7b-instruct
+      annotations:
+        ray.io/overwrite-container-cmd: "true"
+    spec:
+      rayVersion: "2.10.0"
+      headGroupSpec:
+        rayStartParams:
+          dashboard-host: "0.0.0.0"
+          num-cpus: "4"
+          num-gpus: "1"
+        template:
+          metadata:
+            labels:
+              model.aibrix.ai/name: qwen-coder-7b-instruct
+          spec:
+            nodeSelector:
+              kubernetes.io/hostname: main
+            containers:
+              - name: ray-head
+                image: rocm/vllm:latest
+                command: ["/bin/bash", "-lc", "--"]
+                args:
+                  - >
+                    ulimit -n 65536 &&
+                    apt update && apt install -y wget net-tools &&
+                    pip3 install ray[default] pyarrow pandas &&
+                    echo "[INFO] Starting Ray head node..." &&
+                    ray start --head \
+                      --num-cpus=4 \
+                      --num-gpus=1 \
+                      --dashboard-host=0.0.0.0 \
+                      --metrics-export-port=8080 \
+                      --dashboard-agent-listen-port=52365 &&
+
+                    echo "[INFO] Waiting for Ray dashboard to be ready..." &&
+                    until curl --max-time 5 --fail http://127.0.0.1:8265 > /dev/null 2>&1; do
+                      echo "[WAITING] $(date -u +'%Y-%m-%dT%H:%M:%SZ') - Ray dashboard not ready yet...";
+                      sleep 2;
+                    done &&
+                    echo "[SUCCESS] Ray dashboard is available!" &&
+
+                    export VLLM_HOST_IP=$(hostname -i | awk '{print $1}') &&
+                    echo "[INFO] VLLM_HOST_IP=$VLLM_HOST_IP" &&
+
+                    echo "[INFO] Starting vLLM server..." &&
+                    vllm serve Qwen/Qwen2.5-Coder-7B-Instruct \
+                      --served-model-name qwen-coder-7b-instruct \
+                      --tensor-parallel-size 2 \
+                      --distributed-executor-backend ray \
+                      --host 0.0.0.0 \
+                      --port 8000 \
+                      --dtype auto
+                env:
+                  - name: VLLM_HOST_IP
+                    valueFrom:
+                      fieldRef:
+                        fieldPath: status.podIP
+                ports:
+                  - containerPort: 6379
+                    name: gcs-server
+                  - containerPort: 8265
+                    name: dashboard
+                  - containerPort: 10001
+                    name: client
+                  - containerPort: 8000
+                    name: service
+                resources:
+                  limits:
+                    cpu: "4"
+                    amd.com/gpu: 1
+                  requests:
+                    cpu: "4"
+                    amd.com/gpu: 1
+                volumeMounts:
+                  - name: dev-kfd
+                    mountPath: /dev/kfd
+                  - name: dev-dri
+                    mountPath: /dev/dri
+              - name: aibrix-runtime
+                image: aibrix/runtime:v0.6.0
+                command:
+                  - aibrix_runtime
+                  - --port
+                  - "8080"
+                env:
+                  - name: INFERENCE_ENGINE
+                    value: vllm
+                  - name: INFERENCE_ENGINE_ENDPOINT
+                    value: http://localhost:8000
+                  - name: PYTORCH_ROCM_ARCH
+                    value: "gfx942"
+                ports:
+                  - containerPort: 8080
+                    protocol: TCP
+                livenessProbe:
+                  httpGet:
+                    path: /healthz
+                    port: 8080
+                  initialDelaySeconds: 3
+                  periodSeconds: 2
+                readinessProbe:
+                  httpGet:
+                    path: /ready
+                    port: 8080
+                  initialDelaySeconds: 5
+                  periodSeconds: 10
+                resources:
+                  limits:
+                    cpu: "1"
+                  requests:
+                    cpu: "1"
+            volumes:
+              - name: dev-kfd
+                hostPath:
+                  path: /dev/kfd
+              - name: dev-dri
+                hostPath:
+                  path: /dev/dri
+      workerGroupSpecs:
+        - groupName: small-group
+          replicas: 1
+          minReplicas: 1
+          maxReplicas: 1
+          rayStartParams:
+            num-cpus: "4"
+            num-gpus: "1"
+          template:
+            metadata:
+              labels:
+                model.aibrix.ai/name: qwen-coder-7b-instruct
+            spec:
+              nodeSelector:
+                kubernetes.io/hostname: seventh-node
+              containers:
+                - name: ray-worker
+                  image: rocm/vllm:latest
+                  env:
+                    - name: MY_POD_IP
+                      valueFrom:
+                        fieldRef:
+                          fieldPath: status.podIP
+                    - name: VLLM_HOST_IP
+                      valueFrom:
+                        fieldRef:
+                          fieldPath: status.podIP
+                  readinessProbe:
+                    exec:
+                      command:
+                        - python3
+                        - -c
+                        - "import ray; ray.init(address='auto', ignore_reinit_error=True); print('ok')"
+                    initialDelaySeconds: 15
+                    periodSeconds: 10
+                    failureThreshold: 3
+                  livenessProbe:
+                    exec:
+                      command:
+                        - python3
+                        - -c
+                        - "import ray; ray.init(address='auto', ignore_reinit_error=True); print('ok')"
+                    initialDelaySeconds: 30
+                    periodSeconds: 20
+                    failureThreshold: 3
+                  command: ["/bin/bash", "-lc", "--"]
+                  args:
+                    - >
+                      ulimit -n 65536 &&
+                      sleep 5 &&
+                      eval "$KUBERAY_GEN_RAY_START_CMD --node-ip-address=$MY_POD_IP" &&
+                      tail -f /dev/null
+                  lifecycle:
+                    preStop:
+                      exec:
+                        command: ["/bin/sh", "-c", "ray stop"]
+                  resources:
+                    limits:
+                      cpu: "4"
+                      amd.com/gpu: 1
+                    requests:
+                       cpu: "4"
+                       amd.com/gpu: 1
+                  volumeMounts:
+                    - name: dev-kfd
+                      mountPath: /dev/kfd
+                    - name: dev-dri
+                      mountPath: /dev/dri
+              volumes:
+                - name: dev-kfd
+                  hostPath:
+                    path: /dev/kfd
+                - name: dev-dri
+                  hostPath:
+                    path: /dev/dri
+
+---
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: qwen-coder-7b-instruct
+  namespace: default
+  labels:
+    model.aibrix.ai/name: qwen-coder-7b-instruct
+    prometheus-discovery: "true"
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "8080"
+spec:
+  selector:
+    model.aibrix.ai/name: qwen-coder-7b-instruct
+  ports:
+    - name: serve
+      port: 8000
+      protocol: TCP
+      targetPort: 8000
+    - name: http
+      port: 8080
+      protocol: TCP
+      targetPort: 8080
+
+---
+
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: qwen-coder-7b-instruct-router
+  namespace: aibrix-system
+spec:
+  parentRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: aibrix-eg
+      namespace: aibrix-system
+  rules:
+    - backendRefs:
+        - group: ""
+          kind: Service
+          name: qwen-coder-7b-instruct
+          namespace: default
+          port: 8000
+          weight: 1
+      matches:
+        - headers:
+            - name: model
+              type: Exact
+              value: qwen-coder-7b-instruct
+          path:
+            type: PathPrefix
+            value: /v1/completions
+        - headers:
+            - name: model
+              type: Exact
+              value: qwen-coder-7b-instruct
+          path:
+            type: PathPrefix
+            value: /v1/chat/completions
+      timeouts:
+        request: 120s

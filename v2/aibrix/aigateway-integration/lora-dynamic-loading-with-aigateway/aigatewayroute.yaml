@@ -1,0 +1,62 @@
+apiVersion: aigateway.envoyproxy.io/v1alpha1
+kind: AIGatewayRoute
+metadata:
+  name: llama3-route
+  namespace: aibrix-system
+spec:
+  parentRefs:
+    - name: aibrix-eg
+      kind: Gateway
+      group: gateway.networking.k8s.io
+  rules:
+    - matches:
+        - headers:
+            - type: Exact
+              name: x-ai-eg-model
+              value: qwen-coder-1-5b-instruct
+      backendRefs:
+        - name: qwen-coder-1-5b-instruct
+    - matches:
+        - headers:
+            - type: Exact
+              name: x-ai-eg-model
+              value: qwen-code-lora
+      backendRefs:
+        - name: qwen-code-lora
+    - matches:
+        - headers:
+            - type: Exact
+              name: x-ai-eg-model
+              value: qwen-code-educational
+      backendRefs:
+        - name: qwen-code-educational
+    - matches:
+        - headers:
+            - type: Exact
+              name: x-ai-eg-model
+              value: qwen-code-flutter-dev-lora
+      backendRefs:
+        - name: qwen-code-flutter-dev-lora
+    - matches:
+        - headers:
+            - type: Exact
+              name: x-ai-eg-model
+              value: qwen-code-n8n-workflow-generator-lora
+      backendRefs:
+        - name: qwen-code-n8n-workflow-generator-lora
+    - matches:
+        - headers:
+            - type: Exact
+              name: x-ai-eg-model
+              value: qwen-code-sql-lora
+      backendRefs:
+        - name: qwen-code-sql-lora
+    - matches:
+        - headers:
+            - type: Exact
+              name: x-ai-eg-model
+              value: yugdave-finetuned-query-response
+      backendRefs:
+        - name: yugdave-finetuned-query-response
+    - backendRefs:
+        - name: qwen-coder-1-5b-instruct
